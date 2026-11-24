@@ -33,3 +33,6 @@ CLAUDE.md
 
 # === OS files ===
 Desktop.ini
+
+# === Local documents (keep locally, do not commit) ===
+*.docx
