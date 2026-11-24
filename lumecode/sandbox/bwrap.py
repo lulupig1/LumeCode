@@ -1,4 +1,3 @@
-
 """Linux bubblewrap（bwrap）沙箱实现。
 
 通过 bwrap 创建隔离的用户命名空间，将根文件系统以只读方式挂载，
@@ -34,19 +33,31 @@ class BwrapSandbox(Sandbox):
             "bwrap",
             "--unshare-user",
             "--unshare-pid",
+            # 父进程退出时一并终止沙箱进程，避免留下孤儿。
+            "--die-with-parent",
             # 根目录只读挂载
-            "--ro-bind", "/", "/",
+            "--ro-bind",
+            "/",
+            "/",
         ]
 
-        # 可写路径：用 --bind（读写）覆盖只读挂载
+        # 可写路径：用 --bind（读写）覆盖只读挂载。
+        # --bind 的源路径必须已存在，否则 bwrap 会让整条命令失败；不存在的
+        # 路径（还没创建、或本就无需开放）直接跳过，而不是拖垮整次调用。
         for path in config.allow_write:
-            resolved = str(Path(path).resolve())
-            args.extend(["--bind", resolved, resolved])
+            resolved = Path(path).resolve()
+            if not resolved.exists():
+                continue
+            args.extend(["--bind", str(resolved), str(resolved)])
 
-        # 禁写路径：用 --ro-bind 强制只读（覆盖上面的 --bind）
+        # 禁写路径：用 --ro-bind 强制只读（覆盖上面的 --bind）。
+        # 同理，--ro-bind 不能指向不存在的源——例如 .lumecode/config.yaml
+        # 尚未创建时，一个"保护"路径不该导致命令跑不起来。
         for path in config.deny_write:
-            resolved = str(Path(path).resolve())
-            args.extend(["--ro-bind", resolved, resolved])
+            resolved = Path(path).resolve()
+            if not resolved.exists():
+                continue
+            args.extend(["--ro-bind", str(resolved), str(resolved)])
 
         # 网络隔离
         if not config.network_enabled:

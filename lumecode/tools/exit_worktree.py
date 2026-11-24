@@ -1,7 +1,6 @@
-
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -16,7 +15,7 @@ class ExitWorktreeParams(BaseModel):
     action: str = Field(
         description='"keep" leaves the worktree and branch on disk; "remove" deletes both.',
     )
-    discard_changes: Optional[bool] = Field(
+    discard_changes: bool | None = Field(
         default=None,
         description=(
             'Required true when action is "remove" and the worktree has '
@@ -36,10 +35,8 @@ class ExitWorktreeTool(Tool):
     category = "command"
     should_defer = True
 
-
     def __init__(self, worktree_manager: WorktreeManager) -> None:
         self._manager = worktree_manager
-
 
     async def execute(self, params: ExitWorktreeParams) -> ToolResult:
         session = self._manager.get_current_session()
@@ -64,9 +61,7 @@ class ExitWorktreeTool(Tool):
         discard = params.discard_changes or False
 
         if action == "remove" and not discard:
-            changes = count_worktree_changes(
-                session.worktree_path, session.original_head_commit
-            )
+            changes = count_worktree_changes(session.worktree_path, session.original_head_commit)
             if changes.uncommitted > 0 or changes.new_commits > 0:
                 parts = []
                 if changes.uncommitted > 0:
@@ -93,9 +88,7 @@ class ExitWorktreeTool(Tool):
         try:
             await self._manager.exit(wt_name, action=action, discard_changes=discard)
         except Exception as e:
-            return ToolResult(
-                output=f"Error exiting worktree: {e}", is_error=True
-            )
+            return ToolResult(output=f"Error exiting worktree: {e}", is_error=True)
 
         if action == "keep":
             return ToolResult(

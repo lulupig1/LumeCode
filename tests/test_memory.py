@@ -1,9 +1,6 @@
-﻿
 from __future__ import annotations
 
-import json
-import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -22,12 +19,10 @@ from lumecode.memory.instructions import (
 )
 from lumecode.memory.session import (
     RecordType,
-    ResumeResult,
     Session,
     SessionManager,
     SessionMeta,
     SessionRecord,
-
     make_compact_boundary,
     parse_compact_boundary,
     records_to_messages,
@@ -37,6 +32,7 @@ from lumecode.memory.session import (
 # =========================================================================
 # A. 指令文件（LUMECODE.md）
 # =========================================================================
+
 
 class TestProcessIncludes:
     def test_no_includes(self, tmp_path: Path) -> None:
@@ -84,9 +80,7 @@ class TestProcessIncludes:
         b = tmp_path / "b.md"
         a.write_text("start\n@include ./b.md\nend-a", encoding="utf-8")
         b.write_text("middle\n@include ./a.md\nend-b", encoding="utf-8")
-        result = process_includes(
-            "@include ./a.md", tmp_path, tmp_path
-        )
+        result = process_includes("@include ./a.md", tmp_path, tmp_path)
         # a.md 被展开，b.md 也被展开，但 b 中再次 @include a 时被跳过
         assert "start" in result
         assert "middle" in result
@@ -113,6 +107,7 @@ class TestProcessIncludes:
         result = process_includes(content, tmp_path, tmp_path)
         assert "new syntax content" in result
 
+
 class TestLoadInstructions:
     def test_single_layer(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         lumecode_md = tmp_path / "LUMECODE.md"
@@ -137,9 +132,11 @@ class TestLoadInstructions:
         result = load_instructions(str(tmp_path))
         assert result == ""
 
+
 # =========================================================================
 # B. 会话记录 SessionRecord
 # =========================================================================
+
 
 class TestSessionRecord:
     def test_user_message_roundtrip(self) -> None:
@@ -187,7 +184,12 @@ class TestSessionRecord:
 
     def test_malformed_jsonl_returns_none(self) -> None:
         assert SessionRecord.from_jsonl("{bad json") is None
-        assert SessionRecord.from_jsonl('{"type":"unknown","content":"x","timestamp":"2025-01-01T00:00:00"}') is None
+        assert (
+            SessionRecord.from_jsonl(
+                '{"type":"unknown","content":"x","timestamp":"2025-01-01T00:00:00"}'
+            )
+            is None
+        )
 
     def test_plain_assistant_message(self) -> None:
         msg = Message(role="assistant", content="done")
@@ -195,9 +197,11 @@ class TestSessionRecord:
         assert len(records) == 1
         assert records[0].content == "done"
 
+
 # =========================================================================
 # C. 会话 Session 与会话管理器 SessionManager
 # =========================================================================
+
 
 class TestSession:
     def test_append_writes_jsonl_and_updates_meta(self, tmp_path: Path) -> None:
@@ -230,8 +234,8 @@ class TestSession:
             session.append(Message(role="user", content="my first question"))
             assert meta.title == "my first question"
 
-class TestSessionManager:
 
+class TestSessionManager:
     def test_create_and_list(self, tmp_path: Path) -> None:
         mgr = SessionManager(str(tmp_path))
         s1 = mgr.create()
@@ -259,7 +263,7 @@ class TestSessionManager:
     def test_cleanup_removes_old_sessions(self, tmp_path: Path) -> None:
         mgr = SessionManager(str(tmp_path))
         s = mgr.create()
-        s.meta.last_active = datetime.now(timezone.utc) - timedelta(days=31)
+        s.meta.last_active = datetime.now(UTC) - timedelta(days=31)
         s.meta.save(mgr._sessions_dir / f"{s.session_id}.meta")
         s.close()
 
@@ -274,13 +278,15 @@ class TestSessionManager:
         assert len(s.session_id.split("_")) == 4
         s.close()
 
+
 # =========================================================================
 # D. 消息链校验与会话恢复
 # =========================================================================
 
+
 class TestValidateMessageChain:
     def test_complete_chain(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         records = [
             SessionRecord(type=RecordType.USER, content="hi", timestamp=now),
             SessionRecord(
@@ -302,7 +308,7 @@ class TestValidateMessageChain:
         assert validate_message_chain(records) == 4
 
     def test_truncate_at_missing_tool_result(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         records = [
             SessionRecord(type=RecordType.USER, content="hi", timestamp=now),
             SessionRecord(type=RecordType.ASSISTANT, content="ok", timestamp=now),
@@ -319,9 +325,10 @@ class TestValidateMessageChain:
     def test_empty_records(self) -> None:
         assert validate_message_chain([]) == 0
 
+
 class TestRecordsToMessages:
     def test_basic_roundtrip(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         records = [
             SessionRecord(type=RecordType.USER, content="hello", timestamp=now),
             SessionRecord(type=RecordType.ASSISTANT, content="world", timestamp=now),
@@ -332,7 +339,7 @@ class TestRecordsToMessages:
         assert messages[1].role == "assistant"
 
     def test_tool_result_grouping(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         records = [
             SessionRecord(type=RecordType.USER, content="go", timestamp=now),
             SessionRecord(
@@ -361,7 +368,7 @@ class TestRecordsToMessages:
         assert messages[3].role == "assistant"
 
     def test_system_prompt_skipped(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         records = [
             SessionRecord(type=RecordType.SYSTEM_PROMPT, content="system", timestamp=now),
             SessionRecord(type=RecordType.USER, content="hi", timestamp=now),
@@ -369,6 +376,7 @@ class TestRecordsToMessages:
         messages = records_to_messages(records)
         assert len(messages) == 1
         assert messages[0].content == "hi"
+
 
 class TestSessionResume:
     def test_resume_restores_messages(self, tmp_path: Path) -> None:
@@ -412,9 +420,11 @@ class TestSessionResume:
         assert len(result.messages) == 2
         result.session.close()
 
+
 # =========================================================================
 # D2. 压缩边界的持久化 + 恢复时重新加载压缩后的状态
 # =========================================================================
+
 
 class TestCompactBoundaryRoundTrip:
     def test_make_and_parse_boundary_text_only(self) -> None:
@@ -468,8 +478,9 @@ class TestCompactBoundaryRoundTrip:
 
     def test_parse_malformed_boundary_degrades(self) -> None:
         bad = SessionRecord(
-            type=RecordType.COMPACT_BOUNDARY, content="not a dict",
-            timestamp=datetime.now(timezone.utc),
+            type=RecordType.COMPACT_BOUNDARY,
+            content="not a dict",
+            timestamp=datetime.now(UTC),
         )
         summary, keep_msgs = parse_compact_boundary(bad)
         assert summary == ""
@@ -532,13 +543,23 @@ class TestCompactBoundaryRoundTrip:
         sid = s.session_id
 
         s.append(Message(role="user", content="gen0 raw"))
-        s.append_record(make_compact_boundary("FIRST summary", [
-            Message(role="user", content="gen1 kept"),
-        ]))
+        s.append_record(
+            make_compact_boundary(
+                "FIRST summary",
+                [
+                    Message(role="user", content="gen1 kept"),
+                ],
+            )
+        )
         s.append(Message(role="assistant", content="between boundaries"))
-        s.append_record(make_compact_boundary("SECOND summary", [
-            Message(role="user", content="gen2 kept"),
-        ]))
+        s.append_record(
+            make_compact_boundary(
+                "SECOND summary",
+                [
+                    Message(role="user", content="gen2 kept"),
+                ],
+            )
+        )
         s.append(Message(role="user", content="after second"))
         s.close()
 
@@ -581,9 +602,11 @@ class TestCompactBoundaryRoundTrip:
         assert s.meta.message_count == before  # 边界只是一个标记，不算一轮对话
         s.close()
 
+
 # =========================================================================
 # F. 会话元数据 SessionMeta
 # =========================================================================
+
 
 class TestSessionMeta:
     def test_save_and_load(self, tmp_path: Path) -> None:
@@ -608,9 +631,11 @@ class TestSessionMeta:
         path.write_text("not json", encoding="utf-8")
         assert SessionMeta.load(path) is None
 
+
 # =========================================================================
 # G. 记忆管理器 MemoryManager
 # =========================================================================
+
 
 class TestMemoryManager:
     """对齐 Go 版 Manager：独立 .md 文件 + frontmatter + MEMORY.md 索引格式。"""
@@ -627,7 +652,9 @@ class TestMemoryManager:
         assert "User-level" in result
         assert "Project-level" in result
 
-    def test_load_includes_memory_index(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_load_includes_memory_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """MEMORY.md 索引内容被包含在 load() 返回的系统提示中。"""
         fake_home = tmp_path / "home"
         fake_home.mkdir()
@@ -644,9 +671,7 @@ class TestMemoryManager:
         )
         # 写 MEMORY.md 索引
         index_file = project_mem_dir / "MEMORY.md"
-        index_file.write_text(
-            "- [Test](test_mem.md) — a test memory\n", encoding="utf-8"
-        )
+        index_file.write_text("- [Test](test_mem.md) — a test memory\n", encoding="utf-8")
 
         mgr = MemoryManager(str(tmp_path / "project"))
         result = mgr.load()
@@ -727,9 +752,11 @@ class TestMemoryManager:
         assert "[project]" in summaries[0]
         assert "db" in summaries[0]
 
+
 # =========================================================================
 # H. 会话注入长期记忆 inject_long_term_memory
 # =========================================================================
+
 
 class TestConversationInjection:
     def test_inject_long_term_memory(self) -> None:
@@ -782,15 +809,207 @@ class TestConversationInjection:
         conv.replace_history([])
         assert conv.ltm_injected is False
 
+
 # =========================================================================
 # I. 记忆抽取 prompt 的构造
 # =========================================================================
 
+
 class TestMemoryExtraction:
     def test_memory_types_aligned_with_go(self, tmp_path: Path) -> None:
         """验证四种记忆类型与 Go 版一致。"""
-        from lumecode.memory.auto_memory import VALID_TYPES, _USER_LEVEL_TYPES, _PROJECT_LEVEL_TYPES
+        from lumecode.memory.auto_memory import _PROJECT_LEVEL_TYPES, _USER_LEVEL_TYPES, VALID_TYPES
 
-        assert VALID_TYPES == {"user", "feedback", "project", "reference"}
-        assert _USER_LEVEL_TYPES == {"user", "feedback"}
-        assert _PROJECT_LEVEL_TYPES == {"project", "reference"}
+        assert {"user", "feedback", "project", "reference"} == VALID_TYPES
+        assert {"user", "feedback"} == _USER_LEVEL_TYPES
+        assert {"project", "reference"} == _PROJECT_LEVEL_TYPES
+
+
+# =========================================================================
+# J. 写穿持久化（P0：产生即写、恢复不修补）
+# =========================================================================
+
+
+def _new_session(tmp_path: Path) -> tuple[SessionManager, Session]:
+    mgr = SessionManager(str(tmp_path))
+    return mgr, mgr.create()
+
+
+class TestWriteThrough:
+    def test_add_message_persists_immediately(self, tmp_path: Path) -> None:
+        """回合还没结束，消息就已经在磁盘上（崩溃恢复的前提）。"""
+        mgr, session = _new_session(tmp_path)
+        conv = ConversationManager()
+        conv.attach_sink(session.on_message, session.on_replace)
+
+        conv.add_user_message("halfway through")
+        conv.add_assistant_message("partial answer")
+
+        # 不 close、不 flush 到"回合结束"，直接另开文件读取
+        lines = [
+            ln
+            for ln in (mgr._sessions_dir / f"{session.session_id}.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if ln.strip()
+        ]
+        session.close()
+        assert any('"halfway through"' in ln for ln in lines)
+        assert any('"partial answer"' in ln for ln in lines)
+
+    def test_thinking_blocks_roundtrip(self, tmp_path: Path) -> None:
+        from lumecode.conversation import ThinkingBlock
+
+        mgr, session = _new_session(tmp_path)
+        conv = ConversationManager()
+        conv.attach_sink(session.on_message, session.on_replace)
+        conv.add_user_message("think")
+        conv.add_assistant_message(
+            "answer",
+            thinking_blocks=[ThinkingBlock(thinking="let me reason", signature="sig-1")],
+        )
+        sid = session.session_id
+        session.close()
+
+        result = mgr.resume(sid)
+        assert result is not None
+        thinking = result.messages[1].thinking_blocks
+        assert len(thinking) == 1
+        assert thinking[0].thinking == "let me reason"
+        assert thinking[0].signature == "sig-1"
+        result.session.close()
+
+    def test_rollback_survives_resume(self, tmp_path: Path) -> None:
+        from lumecode.conversation import HistoryReplacement
+
+        mgr, session = _new_session(tmp_path)
+        conv = ConversationManager()
+        conv.attach_sink(session.on_message, session.on_replace)
+        conv.add_user_message("q1")
+        conv.add_assistant_message("a1")
+        conv.add_user_message("q2")
+        conv.add_assistant_message("a2")
+
+        conv.replace_history(
+            conv.history[:2],
+            HistoryReplacement(kind="rollback", message_index=2),
+        )
+        sid = session.session_id
+        session.close()
+
+        result = mgr.resume(sid)
+        assert result is not None
+        assert [m.content for m in result.messages] == ["q1", "a1"]
+        result.session.close()
+
+    def test_compact_sink_writes_single_boundary_with_attachment(self, tmp_path: Path) -> None:
+        from lumecode.conversation import HistoryReplacement
+
+        mgr, session = _new_session(tmp_path)
+        conv = ConversationManager()
+        conv.attach_sink(session.on_message, session.on_replace)
+        conv.add_user_message("old")
+        conv.add_assistant_message("old answer")
+
+        summary_msg = Message(role="user", content="SUMMARY: stuff happened\n\nattachment")
+        keep = [Message(role="assistant", content="kept")]
+        conv.replace_history(
+            [summary_msg, *keep],
+            HistoryReplacement(
+                kind="compact",
+                message_index=2,
+                summary="stuff happened",
+                keep=keep,
+                summary_message=summary_msg,
+            ),
+        )
+        conv.add_user_message("after compact")
+        sid = session.session_id
+        session.close()
+
+        raw = (mgr._sessions_dir / f"{sid}.jsonl").read_text(encoding="utf-8")
+        assert raw.count('"type": "compact_boundary"') == 1
+
+        result = mgr.resume(sid)
+        assert result is not None
+        contents = [m.content for m in result.messages]
+        # 压缩后的内存历史 = 摘要消息 + keep + 后续消息，恢复结果逐条一致
+        assert contents == [
+            summary_msg.content,
+            "kept",
+            "after compact",
+        ]
+        result.session.close()
+
+    def test_ordinal_is_monotonic_across_resume(self, tmp_path: Path) -> None:
+        mgr, session = _new_session(tmp_path)
+        conv = ConversationManager()
+        conv.attach_sink(session.on_message, session.on_replace)
+        conv.add_user_message("one")
+        sid = session.session_id
+        session.close()
+
+        result = mgr.resume(sid)
+        assert result is not None
+        result.session.append(Message(role="assistant", content="two"))
+        result.session.close()
+
+        ordinals = []
+        for line in (mgr._sessions_dir / f"{sid}.jsonl").read_text(encoding="utf-8").splitlines():
+            if line.strip() and '"ordinal"' in line:
+                ordinals.append(SessionRecord.from_jsonl(line).ordinal)
+        assert ordinals == sorted(ordinals)
+        assert len(set(ordinals)) == len(ordinals)
+
+    def test_legacy_file_without_header_still_resumes(self, tmp_path: Path) -> None:
+        """v0 旧文件没有文件头、没有 ordinal，必须照常恢复。"""
+        sessions_dir = tmp_path / ".lumecode" / "sessions"
+        sessions_dir.mkdir(parents=True)
+        sid = "session_legacy_0001"
+        SessionMeta(id=sid).save(sessions_dir / f"{sid}.meta")
+        with open(sessions_dir / f"{sid}.jsonl", "a", encoding="utf-8") as f:
+            f.write('{"type":"user","content":"old q","timestamp":"2025-01-01T00:00:00+00:00"}\n')
+            f.write(
+                '{"type":"assistant","content":"old a","timestamp":"2025-01-01T00:00:01+00:00"}\n'
+            )
+
+        mgr = SessionManager(str(tmp_path))
+        result = mgr.resume(sid)
+        assert result is not None
+        assert [m.content for m in result.messages] == ["old q", "old a"]
+        result.session.close()
+
+    def test_injected_context_not_duplicated_after_resume(self, tmp_path: Path) -> None:
+        """环境信息落盘后在恢复时会被剔除，由启动流程重新注入一份。"""
+        mgr, session = _new_session(tmp_path)
+        conv = ConversationManager()
+        conv.attach_sink(session.on_message, session.on_replace)
+        conv.add_user_message("real question")
+        # 模拟旧行为：环境上下文被当成普通消息落盘
+        session.append(
+            Message(
+                role="user",
+                content="Current working directory: /tmp\nOperating system: Linux",
+            )
+        )
+        sid = session.session_id
+        session.close()
+
+        result = mgr.resume(sid)
+        assert result is not None
+        assert [m.content for m in result.messages] == ["real question"]
+        result.session.close()
+
+    def test_new_file_has_version_header(self, tmp_path: Path) -> None:
+        mgr, session = _new_session(tmp_path)
+        session.close()
+        first = (
+            (mgr._sessions_dir / f"{session.session_id}.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()[0]
+        )
+        import json
+
+        header = json.loads(first)
+        assert header["type"] == "_meta"
+        assert header["version"] >= 1

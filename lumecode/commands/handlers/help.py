@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from lumecode.commands.registry import Command, CommandContext, CommandType
@@ -47,4 +46,3 @@ HELP_COMMAND = Command(
     type=CommandType.LOCAL,
     handler=handle_help,
 )
-

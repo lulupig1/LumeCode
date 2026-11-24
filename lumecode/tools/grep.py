@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import re
@@ -21,7 +20,6 @@ class Grep(Tool):
     params_model = Params
     category = "read"
     is_concurrency_safe = True
-
 
     async def execute(self, params: Params) -> ToolResult:
         base = Path(params.path)
@@ -55,4 +53,3 @@ class Grep(Tool):
         if not results:
             return ToolResult(output="No matches found.")
         return ToolResult(output="\n".join(results))
-

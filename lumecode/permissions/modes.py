@@ -1,11 +1,9 @@
-
 from __future__ import annotations
 
 from enum import Enum
 from typing import Literal
 
 from lumecode.tools.base import ToolCategory
-
 
 DecisionEffect = Literal["allow", "deny", "ask"]
 

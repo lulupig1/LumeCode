@@ -23,7 +23,6 @@ class SkillLoader:
         self._cache: dict[str, SkillDef] = {}
         self._dir_mod_times: dict[str, float] = {}
 
-
     def load_all(self) -> dict[str, SkillDef]:
         seen: dict[str, SkillDef] = {}
 
@@ -40,10 +39,9 @@ class SkillLoader:
                 seen[skill.name] = skill
 
         self._skills = seen
-        self._cache = {k: v for k, v in seen.items()}
+        self._cache = dict(seen.items())
         self._snapshot_dir_mod_times()
         return seen
-
 
     def _scan_directory(self, path: Path, source: str) -> list[SkillDef]:
         results: list[SkillDef] = []
@@ -60,9 +58,9 @@ class SkillLoader:
                     # 优先尝试 skill.yaml + prompt.md 格式（对齐 Go 版）
                     skill_yaml = entry / "skill.yaml"
                     if skill_yaml.is_file():
-                        skill = self._parse_skill_yaml(skill_yaml, entry)
-                        if skill is not None:
-                            results.append(skill)
+                        yaml_skill = self._parse_skill_yaml(skill_yaml, entry)
+                        if yaml_skill is not None:
+                            results.append(yaml_skill)
                             continue
                     # 回退到 SKILL.md 格式
                     skill_md = entry / "SKILL.md"
@@ -133,7 +131,6 @@ class SkillLoader:
         """内置 skill 已移除，返回空列表。"""
         return []
 
-
     def get(self, name: str) -> SkillDef | None:
         skill = self._skills.get(name)
         if skill is None:
@@ -149,7 +146,8 @@ class SkillLoader:
             except SkillParseError as e:
                 log.warning(
                     "Hot-reload failed for skill '%s', using cached version: %s",
-                    name, e,
+                    name,
+                    e,
                 )
                 return self._cache.get(name, skill)
 
@@ -188,7 +186,6 @@ class SkillLoader:
 
     def reload(self) -> dict[str, SkillDef]:
         return self.load_all()
-
 
     def get_source_label(self, name: str) -> str:
         skill = self._skills.get(name)

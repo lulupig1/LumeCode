@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 import os
 import random
+import re
 import time as _time
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from rich.markup import escape
+from rich.text import Text as RichText
 from textual.app import App, ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message as TMessage
+from textual.theme import Theme
+from textual.timer import Timer
 from textual.widgets import Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
@@ -22,7 +28,6 @@ from lumecode.agent import (
     HookEvent,
     LoopComplete,
     PermissionRequest,
-    PermissionResponse,
     RetryEvent,
     StreamText,
     ThinkingText,
@@ -31,6 +36,12 @@ from lumecode.agent import (
     TurnComplete,
     UsageEvent,
 )
+from lumecode.agents.loader import AgentLoader
+from lumecode.agents.notification import inject_task_notifications
+from lumecode.agents.task_manager import TaskManager
+from lumecode.agents.trace import TraceManager
+from lumecode.askuser_dialog import InlineAskUserWidget
+from lumecode.cache import FileCache
 from lumecode.client import (
     AuthenticationError,
     LLMClient,
@@ -46,9 +57,12 @@ from lumecode.commands import (
 )
 from lumecode.commands.completion import CompletionPopup
 from lumecode.commands.handlers import register_all_commands
-from lumecode.config import MCPServerConfig, ProviderConfig
-from lumecode.hooks import HookContext, HookEngine, load_hooks
+from lumecode.commands.handlers.skill_register import register_skill_commands
+from lumecode.commands.handlers.tasks import create_tasks_command
+from lumecode.commands.handlers.worktree import create_worktree_command
+from lumecode.config import EmbeddingConfig, MCPServerConfig, MemoryAppConfig, ProviderConfig
 from lumecode.conversation import ConversationManager, Message
+from lumecode.hooks import HookContext, HookEngine
 from lumecode.mcp import ConnectResult, MCPManager
 from lumecode.memory import (
     MemoryManager,
@@ -57,9 +71,8 @@ from lumecode.memory import (
     find_relevant_memories,
     generate_session_summary,
     load_instructions,
-    make_compact_boundary,
-    render_reminder,
 )
+from lumecode.permission_dialog import InlinePermissionWidget
 from lumecode.permissions import (
     DangerousCommandDetector,
     PathSandbox,
@@ -67,29 +80,23 @@ from lumecode.permissions import (
     PermissionMode,
     RuleEngine,
 )
-from lumecode.agents.loader import AgentLoader
-from lumecode.agents.task_manager import TaskManager
-from lumecode.agents.trace import TraceManager
-from lumecode.agents.notification import inject_task_notifications
-from lumecode.commands.handlers.tasks import create_tasks_command
+from lumecode.plan_dialog import InlinePlanWidget, PlanChoice
 from lumecode.skills.executor import SkillExecutor
 from lumecode.skills.loader import SkillLoader
-from lumecode.commands.handlers.skill_register import register_skill_commands
-from rich.text import Text as RichText
-from textual.theme import Theme
-from lumecode.cache import FileCache
+from lumecode.tasks import spawn_background
+from lumecode.teammate_tree import TeammateTree
+from lumecode.telemetry import SpanKind, SpanStatus, TelemetryRecorder, Usage
 from lumecode.tools import ToolRegistry, create_default_registry
 from lumecode.tools.agent_tool import AgentTool
 from lumecode.tools.ask_user import AskUserEvent, AskUserTool
+from lumecode.tools.bash import Bash
 from lumecode.tools.impl.tool_search import ToolSearchTool
 from lumecode.tools.install_skill import InstallSkillTool
 from lumecode.tools.load_skill import LoadSkill
 from lumecode.worktree.cleanup import start_stale_cleanup_task
 from lumecode.worktree.manager import WorktreeManager
-from lumecode.commands.handlers.worktree import create_worktree_command
-from lumecode.teammate_tree import TeammateTree
 
-import re
+log = logging.getLogger(__name__)
 
 MAX_TRUNCATED_LINES = 20
 MAX_AT_REF_BYTES = 10240
@@ -97,6 +104,16 @@ MAX_AT_REF_BYTES = 10240
 _AT_REF_RE = re.compile(r"@([\w./_\-]+(?:\.[\w]+)*)")
 
 _SKIP_DIRS = {".git", "node_modules", ".venv", "__pycache__", ".lumecode", "build", ".gradle"}
+
+
+def _sum_usage(items: list[Usage]) -> Usage:
+    """把隐藏调用的多次 LLM usage 合并成一条 span 的用量。"""
+    return Usage(
+        input_tokens=sum(u.input_tokens for u in items),
+        output_tokens=sum(u.output_tokens for u in items),
+        cache_read_tokens=sum(u.cache_read_tokens for u in items),
+        cache_creation_tokens=sum(u.cache_creation_tokens for u in items),
+    )
 
 
 def scan_files_for_at(prefix: str, work_dir: str, limit: int = 10) -> list[str]:
@@ -128,15 +145,18 @@ def expand_at_refs(text: str, work_dir: str) -> str:
         if not os.path.isfile(full_path):
             return m.group(0)
         try:
-            content = open(full_path, encoding="utf-8", errors="replace").read(MAX_AT_REF_BYTES)
+            with open(full_path, encoding="utf-8", errors="replace") as fh:
+                content = fh.read(MAX_AT_REF_BYTES)
             return f"[File: {rel_path}]\n```\n{content}\n```"
-        except Exception:
+        except Exception as e:
+            log.debug("at-ref expansion failed for %s: %s", rel_path, e)
             return m.group(0)
+
     return _AT_REF_RE.sub(_replace, text)
 
 
 class ChatInput(TextArea):
-    BINDINGS = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("enter", "submit", "Submit", priority=True),
         Binding("shift+enter", "newline", "Newline", priority=True),
         Binding("ctrl+j", "newline", "Newline", priority=True),
@@ -169,9 +189,9 @@ class ChatInput(TextArea):
         if self._history_file.exists():
             try:
                 lines = self._history_file.read_text(encoding="utf-8").splitlines()
-                self._history = [l for l in lines if l.strip()]
-            except Exception:
-                pass
+                self._history = [line for line in lines if line.strip()]
+            except Exception as e:
+                log.debug("history file read failed: %s", e)
 
     def _persist_entry(self, text: str) -> None:
         if self._history_file is None:
@@ -180,8 +200,8 @@ class ChatInput(TextArea):
             self._history_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self._history_file, "a", encoding="utf-8") as f:
                 f.write(text + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("history persist failed: %s", e)
 
     def _popup(self) -> CompletionPopup | None:
         try:
@@ -291,7 +311,7 @@ class ChatInput(TextArea):
         at_idx = text.rfind("@")
         if at_idx < 0:
             return
-        after = text[at_idx + 1:]
+        after = text[at_idx + 1 :]
         if " " in after or "\n" in after:
             return
         if after:
@@ -370,7 +390,6 @@ def _format_detail(tool_name: str, arguments: dict[str, Any], output: str) -> st
 
 
 class ToolCallBlock(Static, can_focus=True):
-
     def __init__(self, tool_name: str, arguments: dict[str, Any], **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.tool_name = tool_name
@@ -458,33 +477,114 @@ def _to_past_tense(verb: str) -> str:
 
 
 THINKING_VERBS = [
-    "Accomplishing", "Architecting", "Baking", "Beboppin'", "Befuddling",
-    "Bloviating", "Boogieing", "Boondoggling", "Bootstrapping", "Brewing",
-    "Calculating", "Canoodling", "Caramelizing", "Cascading", "Cerebrating",
-    "Choreographing", "Churning", "Coalescing", "Cogitating", "Combobulating",
-    "Composing", "Computing", "Concocting", "Considering", "Contemplating",
-    "Cooking", "Crafting", "Creating", "Crunching", "Crystallizing",
-    "Cultivating", "Deciphering", "Deliberating", "Dilly-dallying",
-    "Discombobulating", "Doodling", "Elucidating", "Enchanting", "Envisioning",
-    "Fermenting", "Finagling", "Flambéing", "Flibbertigibbeting", "Flummoxing",
-    "Forging", "Frolicking", "Gallivanting", "Garnishing", "Generating",
-    "Germinating", "Grooving", "Harmonizing", "Hatching", "Honking",
-    "Hullaballooing", "Ideating", "Imagining", "Improvising", "Incubating",
-    "Inferring", "Infusing", "Kneading", "Lollygagging", "Manifesting",
-    "Marinating", "Meandering", "Metamorphosing", "Mewing", "Moonwalking",
-    "Moseying", "Mulling", "Musing", "Noodling", "Orbiting",
-    "Orchestrating", "Percolating", "Philosophising", "Pondering",
-    "Pontificating", "Pouncing", "Purring", "Puzzling", "Razzle-dazzling",
-    "Ruminating", "Scampering", "Simmering", "Sketching", "Spelunking",
-    "Spinning", "Sprouting", "Synthesizing", "Thinking", "Tinkering",
-    "Transfiguring", "Transmuting", "Undulating", "Unfurling", "Unravelling",
-    "Vibing", "Wandering", "Whisking", "Working", "Wrangling", "Zigzagging",
+    "Accomplishing",
+    "Architecting",
+    "Baking",
+    "Beboppin'",
+    "Befuddling",
+    "Bloviating",
+    "Boogieing",
+    "Boondoggling",
+    "Bootstrapping",
+    "Brewing",
+    "Calculating",
+    "Canoodling",
+    "Caramelizing",
+    "Cascading",
+    "Cerebrating",
+    "Choreographing",
+    "Churning",
+    "Coalescing",
+    "Cogitating",
+    "Combobulating",
+    "Composing",
+    "Computing",
+    "Concocting",
+    "Considering",
+    "Contemplating",
+    "Cooking",
+    "Crafting",
+    "Creating",
+    "Crunching",
+    "Crystallizing",
+    "Cultivating",
+    "Deciphering",
+    "Deliberating",
+    "Dilly-dallying",
+    "Discombobulating",
+    "Doodling",
+    "Elucidating",
+    "Enchanting",
+    "Envisioning",
+    "Fermenting",
+    "Finagling",
+    "Flambéing",
+    "Flibbertigibbeting",
+    "Flummoxing",
+    "Forging",
+    "Frolicking",
+    "Gallivanting",
+    "Garnishing",
+    "Generating",
+    "Germinating",
+    "Grooving",
+    "Harmonizing",
+    "Hatching",
+    "Honking",
+    "Hullaballooing",
+    "Ideating",
+    "Imagining",
+    "Improvising",
+    "Incubating",
+    "Inferring",
+    "Infusing",
+    "Kneading",
+    "Lollygagging",
+    "Manifesting",
+    "Marinating",
+    "Meandering",
+    "Metamorphosing",
+    "Mewing",
+    "Moonwalking",
+    "Moseying",
+    "Mulling",
+    "Musing",
+    "Noodling",
+    "Orbiting",
+    "Orchestrating",
+    "Percolating",
+    "Philosophising",
+    "Pondering",
+    "Pontificating",
+    "Pouncing",
+    "Purring",
+    "Puzzling",
+    "Razzle-dazzling",
+    "Ruminating",
+    "Scampering",
+    "Simmering",
+    "Sketching",
+    "Spelunking",
+    "Spinning",
+    "Sprouting",
+    "Synthesizing",
+    "Thinking",
+    "Tinkering",
+    "Transfiguring",
+    "Transmuting",
+    "Undulating",
+    "Unfurling",
+    "Unravelling",
+    "Vibing",
+    "Wandering",
+    "Whisking",
+    "Working",
+    "Wrangling",
+    "Zigzagging",
 ]  # 共 105 个动词，与 Go 版 internal/tui/verbs.go 完全一致
 
 
 class ToolGroupSummary(Static, can_focus=True):
-
-
     def __init__(self, count: int, total_elapsed: float, **kwargs: Any) -> None:
         label = f"● Done ({count} tool uses · {total_elapsed:.1f}s)  (ctrl+o to expand)"
         super().__init__(label, **kwargs)
@@ -497,21 +597,18 @@ class ToolGroupSummary(Static, can_focus=True):
             self.update(f"▼ Done ({self._count} tool uses · {self._total:.1f}s)")
         else:
             self.update(
-                f"● Done ({self._count} tool uses · {self._total:.1f}s)"
-                "  (ctrl+o to expand)"
+                f"● Done ({self._count} tool uses · {self._total:.1f}s)  (ctrl+o to expand)"
             )
 
     def toggle(self) -> None:
         self._expanded = not self._expanded
         self._refresh_display()
 
-
     def on_click(self) -> None:
         self.toggle()
 
 
 class SubAgentBlock(Static, can_focus=True):
-
     def __init__(self, agent_type: str, description: str, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._agent_type = agent_type or "agent"
@@ -538,6 +635,7 @@ class SubAgentBlock(Static, can_focus=True):
 
     def _parse_stats(self, output: str) -> None:
         import re
+
         m = re.search(r"(\d+)\s+tool", output[:200])
         if m:
             self._tool_count = int(m.group(1))
@@ -566,8 +664,8 @@ class SubAgentBlock(Static, can_focus=True):
 
 _LUMECODE_THEME = Theme(
     name="lumecode",
-    primary="#00BCD4",       # 青色 accent（与 Claude Code 紫色区分）
-    background="#0D1117",    # GitHub Dark 风格深色背景
+    primary="#00BCD4",  # 青色 accent（与 Claude Code 紫色区分）
+    background="#0D1117",  # GitHub Dark 风格深色背景
     surface="#0D1117",
     panel="#161B22",
     dark=True,
@@ -579,13 +677,12 @@ class LumeCodeApp(App):
     TITLE = "LumeCode"
     INLINE_PADDING = 0
     theme = "lumecode"
-    BINDINGS = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+c", "handle_ctrl_c", "Quit", priority=True),
         Binding("escape", "cancel", "Cancel", priority=True),
         Binding("shift+tab", "cycle_mode", "Cycle mode", priority=True),
         Binding("ctrl+o", "toggle_tool_blocks", "Toggle tools", priority=True),
     ]
-
 
     def __init__(
         self,
@@ -600,6 +697,7 @@ class LumeCodeApp(App):
         enable_coordinator_mode: bool = False,
         driver_class: type | None = None,
         sandbox_config: Any = None,
+        memory_config: MemoryAppConfig | None = None,
     ) -> None:
         super().__init__(driver_class=driver_class)
         self.providers = providers
@@ -611,7 +709,9 @@ class LumeCodeApp(App):
         self._worktree_config = worktree_config
         self._teammate_mode = teammate_mode
         self._enable_coordinator_mode = enable_coordinator_mode
+        self._memory_config = memory_config or MemoryAppConfig()
         from lumecode.config import SandboxAppConfig
+
         self._sandbox_cfg: SandboxAppConfig = sandbox_config or SandboxAppConfig()
         self.file_cache = FileCache()
         self.client: LLMClient | None = None
@@ -625,15 +725,15 @@ class LumeCodeApp(App):
         self._thinking_start: float = 0.0
         self._thinking_verb: str = ""
         self._spinner_idx: int = 0
-        self._spinner_timer = None
+        self._spinner_timer: Timer | None = None
         self._spinner_label: Static | None = None
         self._mcp_server_info: str = ""
         self._agent_task: asyncio.Task[None] | None = None
-        self._subagent_task: asyncio.Task[None] | None = None
         self._subagent_start_time: float | None = None
         self.session_manager: SessionManager | None = None
         self.session: Session | None = None
         self.memory_manager: MemoryManager | None = None
+        self.vector_index: Any = None
         self._instructions_content: str = ""
         self.command_registry = CommandRegistry()
         register_all_commands(self.command_registry)
@@ -643,6 +743,7 @@ class LumeCodeApp(App):
         self.agent_loader: AgentLoader | None = None
         self.task_manager: TaskManager = TaskManager()
         self.trace_manager: TraceManager = TraceManager()
+        self.telemetry: TelemetryRecorder | None = None
         self._notification_check_task: asyncio.Task[None] | None = None
         self.worktree_manager: WorktreeManager | None = None
         self._stale_cleanup_task: asyncio.Task[None] | None = None
@@ -653,7 +754,10 @@ class LumeCodeApp(App):
         self._mcp_instructions_ok: bool = False
         self._mcp_connecting: bool = False
         self._teammate_tree: TeammateTree | None = None
-        self._teammate_timer = None
+        self._teammate_timer: Timer | None = None
+        # 内联 AskUser / 权限弹窗挂起中的待决事件；响应后复位为 None。
+        self._pending_askuser_event: AskUserEvent | None = None
+        self._pending_perm_request: PermissionRequest | None = None
         # 记录本次会话是否曾退出过 Plan Mode，用于重入时注入提示
         self._has_exited_plan_mode: bool = False
 
@@ -684,10 +788,7 @@ class LumeCodeApp(App):
             with Vertical(id="provider-select"):
                 yield Static("Select a Provider", id="select-label")
                 yield OptionList(
-                    *[
-                        Option(f"{p.name}  [{p.model}]", id=p.name)
-                        for p in self.providers
-                    ],
+                    *[Option(f"{p.name}  [{p.model}]", id=p.name) for p in self.providers],
                     id="provider-list",
                 )
         yield VerticalScroll(id="chat-area")
@@ -720,9 +821,7 @@ class LumeCodeApp(App):
         home = Path.home()
 
         # 根据配置决定是否启用 OS 级沙箱自动放行
-        sandbox_auto_allow = (
-            self._sandbox_cfg.enabled and self._sandbox_cfg.auto_allow
-        )
+        sandbox_auto_allow = self._sandbox_cfg.enabled and self._sandbox_cfg.auto_allow
         checker = PermissionChecker(
             detector=DangerousCommandDetector(),
             sandbox=PathSandbox(work_dir),
@@ -738,6 +837,7 @@ class LumeCodeApp(App):
         # 如果配置启用了沙箱，为 Bash 工具挂载 OS 沙箱
         if self._sandbox_cfg.enabled:
             from lumecode.sandbox import SandboxConfig, create_sandbox
+
             os_sandbox = create_sandbox()
             if os_sandbox and os_sandbox.available():
                 sandbox_config = SandboxConfig(
@@ -749,17 +849,25 @@ class LumeCodeApp(App):
                     network_enabled=self._sandbox_cfg.network_enabled,
                 )
                 bash_tool = self.registry.get("Bash")
-                if bash_tool:
+                if isinstance(bash_tool, Bash):
                     bash_tool.sandbox = os_sandbox
                     bash_tool.sandbox_config = sandbox_config
 
         self._instructions_content = load_instructions(work_dir)
         self.memory_manager = MemoryManager(work_dir)
+        self.vector_index = self._build_vector_index(work_dir)
         self.session_manager = SessionManager(work_dir)
         self.session_manager.cleanup()
         self.session = self.session_manager.create()
+        # 启动时就把会话接成写穿的 sink；否则"输入框回车前"的任何消息
+        # （MCP 指令提示等）会和磁盘脱节。
+        self._attach_sinks()
+        self.telemetry = TelemetryRecorder(
+            self.session.session_id, base_dir=str(Path(work_dir) / ".lumecode" / "traces")
+        )
 
         from lumecode.filehistory import FileHistory
+
         self.file_history = FileHistory(work_dir, self.session.session_id)
         for tool in self.registry.list_tools():
             if hasattr(tool, "file_history"):
@@ -773,12 +881,11 @@ class LumeCodeApp(App):
         self.registry.register(install_skill_tool)
         self._install_skill_tool = install_skill_tool
 
-        self.registry.register(
-            ToolSearchTool(self.registry, protocol=provider.protocol)
-        )
+        self.registry.register(ToolSearchTool(self.registry, protocol=provider.protocol))
         self.registry.register(AskUserTool())
 
         from lumecode.tools.exit_plan_mode import ExitPlanModeTool
+
         self._exit_plan_tool = ExitPlanModeTool()
         self.registry.register(self._exit_plan_tool)
 
@@ -792,9 +899,13 @@ class LumeCodeApp(App):
             instructions_content=self._instructions_content,
             memory_manager=self.memory_manager,
             hook_engine=self.hook_engine,
+            telemetry=self.telemetry,
+            memory_extraction_interval=self._memory_config.extraction_interval,
         )
         self.agent.file_history = self.file_history
         self.agent.session_id = self.session.session_id
+        # 向量召回通常几十~几百毫秒；首轮最多等 0.8s，超时留给后续轮次注入。
+        self.agent.recall_first_wait = 0.8 if self.vector_index is not None else 0.0
 
         self._exit_plan_tool._is_plan_mode = lambda: self.agent.plan_mode
         self._exit_plan_tool._plan_exists = lambda: self.agent._get_plan_path().exists()
@@ -802,9 +913,7 @@ class LumeCodeApp(App):
         # Layer 2: 在后台异步拉取模型的 context window，不阻塞启动流程。
         # agent 已经有一个同步解析的窗口值（来自配置 / 映射表 / 默认值）；
         # 如果异步拉取成功，就原地升级为更准确的值。
-        self.run_worker(
-            self._resolve_context_window(provider), exclusive=False
-        )
+        self.run_worker(self._resolve_context_window(provider), exclusive=False)
 
         self.skill_loader = SkillLoader(work_dir)
         self.skill_loader.load_all()
@@ -829,25 +938,23 @@ class LumeCodeApp(App):
             for name, desc in catalog:
                 lines.append(f"- {name}: {desc}")
             lines.append("")
-            lines.append(
-                "If the user's request matches a Skill, call LoadSkill to activate it."
-            )
+            lines.append("If the user's request matches a Skill, call LoadSkill to activate it.")
             self.agent.set_skill_catalog("\n".join(lines))
 
-        register_skill_commands(
-            self.command_registry, self.skill_loader, self.skill_executor
-        )
+        register_skill_commands(self.command_registry, self.skill_loader, self.skill_executor)
 
         # 安装新 skill 后重新注册斜杠命令，让 /<new-skill> 立即可用
         def _on_skill_installed(name: str) -> None:
-            register_skill_commands(
-                self.command_registry, self.skill_loader, self.skill_executor
-            )
+            if self.skill_loader is not None:
+                register_skill_commands(
+                    self.command_registry, self.skill_loader, self.skill_executor
+                )
 
         install_skill_tool.set_on_installed(_on_skill_installed)
 
         # --- Worktree 系统初始化 ---
         from lumecode.config import WorktreeConfig
+
         wt_cfg = self._worktree_config or WorktreeConfig()
         self.worktree_manager = WorktreeManager(
             repo_root=work_dir,
@@ -862,6 +969,7 @@ class LumeCodeApp(App):
 
         from lumecode.tools.enter_worktree import EnterWorktreeTool
         from lumecode.tools.exit_worktree import ExitWorktreeTool
+
         self.registry.register(EnterWorktreeTool(worktree_manager=self.worktree_manager))
         self.registry.register(ExitWorktreeTool(worktree_manager=self.worktree_manager))
 
@@ -884,7 +992,9 @@ class LumeCodeApp(App):
         from lumecode.tools.team_create import TeamCreateTool
         from lumecode.tools.team_delete import TeamDeleteTool
 
-        self.team_manager = TeamManager(worktree_manager=self.worktree_manager, trace_manager=self.trace_manager)
+        self.team_manager = TeamManager(
+            worktree_manager=self.worktree_manager, trace_manager=self.trace_manager
+        )
 
         agent_tool = AgentTool(
             agent_loader=self.agent_loader,
@@ -943,7 +1053,12 @@ class LumeCodeApp(App):
         self.command_registry.register_sync(tasks_cmd)
 
         from lumecode.commands.handlers.trace import create_trace_command
-        trace_cmd = create_trace_command(self.trace_manager, self.agent.agent_id)
+
+        trace_cmd = create_trace_command(
+            self.trace_manager,
+            self.agent.agent_id,
+            telemetry_getter=lambda: self.telemetry,
+        )
         self.command_registry.register_sync(trace_cmd)
 
         # --- 协调者模式初始化（工具已注册，激活推迟到 TeamCreate 时） ---
@@ -953,10 +1068,8 @@ class LumeCodeApp(App):
         self.agent._team_manager = self.team_manager
 
         if self.hook_engine:
-            asyncio.ensure_future(
-                self.hook_engine.run_hooks(
-                    "startup", HookContext(event_name="startup")
-                )
+            spawn_background(
+                self.hook_engine.run_hooks("startup", HookContext(event_name="startup"))
             )
 
         if self._mcp_server_configs:
@@ -964,9 +1077,7 @@ class LumeCodeApp(App):
 
         self.query_one("#model-label", Static).update(provider.model)
         work_dir = os.getcwd()
-        self.query_one("#title-bar", Static).update(
-            self._make_banner(provider.model, work_dir)
-        )
+        self.query_one("#title-bar", Static).update(self._make_banner(provider.model, work_dir))
         self._update_mode_label()
 
         select = self.query("#provider-select")
@@ -979,9 +1090,7 @@ class LumeCodeApp(App):
         chat_input.load_history(work_dir)
         chat_input.focus()
 
-        self._notification_check_task = asyncio.create_task(
-            self._start_notification_polling()
-        )
+        self._notification_check_task = asyncio.create_task(self._start_notification_polling())
 
     async def _resolve_context_window(self, provider: ProviderConfig) -> None:
         """Layer 2 后台 worker：异步拉取模型的 context window，
@@ -1034,7 +1143,6 @@ class LumeCodeApp(App):
     # 命令分发
     # -----------------------------------------------------------------
 
-
     def _build_command_context(self, args: str) -> CommandContext:
         return CommandContext(
             args=args,
@@ -1046,7 +1154,7 @@ class LumeCodeApp(App):
             ui=self,
             config={
                 "registry": self.command_registry,
-                "set_session": self._set_session,
+                "set_session": self.set_session,
                 "set_conversation": self._set_conversation,
                 "clear_chat": self._clear_chat,
                 "render_restored": self._render_restored_messages,
@@ -1059,24 +1167,46 @@ class LumeCodeApp(App):
         self.session = session
         if self.agent:
             self.agent.session_id = session.session_id
+        self._attach_sinks()
+
+    def _attach_sinks(self) -> None:
+        """把当前 Session 装成对话的写穿钩子。
+
+        之后 add_user_message / add_assistant_message / add_tool_results_message
+        在更新内存的同一时刻落盘，不再依赖回合结束时的批量补抄。
+        """
+        if self.session is None or self.conversation is None:
+            return
+        self.conversation.attach_sink(self.session.on_message, self.session.on_replace)
+
+    def set_session(self, session: Session) -> None:
+        """切换到新会话，并把 telemetry 切到对应的 trace 文件。
+
+        `/clear` 会创建新会话；如果不重建 recorder，后续 span 会继续写进
+        旧会话的 trace 文件。
+        """
+        self._set_session(session)
+        if self.telemetry is not None:
+            self.telemetry.close()
+        work_dir = os.getcwd()
+        self.telemetry = TelemetryRecorder(
+            session.session_id, base_dir=str(Path(work_dir) / ".lumecode" / "traces")
+        )
+        if self.agent is not None:
+            self.agent.telemetry = self.telemetry
 
     def _persist_compact_boundary(self, notification: CompactNotification) -> None:
-        """Layer-2 compact 后写入 compact_boundary 记录。
+        """压缩已由 ConversationManager 的 replace sink 在发生时落盘。
 
-        将摘要 + 原样保留的尾部内联到一条记录中，resume 时只需这一条
-        就能重建压缩后的状态。之前已写入磁盘的原始前缀不会被重放。
-        没有活跃 session 或 compact 未产出 boundary 时直接跳过。
+        这里不再重复写记录（重复写会让 resume 重放出两份 boundary），
+        只保留为 no-op 以兼容旧调用点；将来添加新的压缩入口时，
+        统一走 conversation.replace_history(..., HistoryReplacement(kind="compact"))。
         """
-        if not self.session or notification.boundary is None:
-            return
-        record = make_compact_boundary(
-            notification.boundary.summary,
-            notification.boundary.keep,
-        )
-        self.session.append_record(record)
+        return
 
     def _set_conversation(self, conv: ConversationManager) -> None:
         self.conversation = conv
+        self._attach_sinks()
 
     def _clear_chat(self) -> None:
         chat = self.query_one("#chat-area", VerticalScroll)
@@ -1094,12 +1224,12 @@ class LumeCodeApp(App):
         if name == "":
             commands = self.command_registry.list_commands()
             lines = ["可用命令："]
-            for cmd in commands:
-                aliases_str = ", ".join(f"/{a}" for a in cmd.aliases)
-                name_part = f"/{cmd.name}"
+            for listed_cmd in commands:
+                aliases_str = ", ".join(f"/{a}" for a in listed_cmd.aliases)
+                name_part = f"/{listed_cmd.name}"
                 if aliases_str:
                     name_part += f", {aliases_str}"
-                lines.append(f"  {name_part:<24} {cmd.description}")
+                lines.append(f"  {name_part:<24} {listed_cmd.description}")
             self._show_system_message("\n".join(lines))
             return
 
@@ -1127,10 +1257,8 @@ class LumeCodeApp(App):
         if self._streaming and not text.startswith("/"):
             if self._agent_task and not self._agent_task.done():
                 self._agent_task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._agent_task
-                except (asyncio.CancelledError, Exception):
-                    pass
             self._finish_streaming()
             self._show_system_message("(response interrupted)")
         await self._dispatch_command(text)
@@ -1203,7 +1331,6 @@ class LumeCodeApp(App):
                 block._render_expanded()
 
         for summary in self.query(ToolGroupSummary):
-            was_expanded = summary._expanded
             summary.toggle()
             parent = summary.parent
             if parent:
@@ -1211,10 +1338,10 @@ class LumeCodeApp(App):
                     if isinstance(child, ToolCallBlock) and child.tool_name in COLLAPSIBLE_TOOLS:
                         child.display = summary._expanded
 
-        for block in self.query(SubAgentBlock):
-            if block._done:
-                block._collapsed = not block._collapsed
-                block._render_done()
+        for sub_block in self.query(SubAgentBlock):
+            if sub_block._done:
+                sub_block._collapsed = not sub_block._collapsed
+                sub_block._render_done()
 
     def action_cancel(self) -> None:
         popup = self.query_one(CompletionPopup)
@@ -1222,31 +1349,44 @@ class LumeCodeApp(App):
             popup.hide()
             self.query_one("#chat-input", ChatInput).focus()
             return
+        # 注：原先此处尝试把前台子 Agent "转入后台"（adopt_running），但 app 从未
+        # 保存子 Agent 的 Agent 句柄（_subagent_task 恒为 None，分支不可达），
+        # 且把 asyncio.Task 当 Agent 传入 adopt_running 是类型错误的。要恢复
+        # "Ctrl+C 转后台" 需先在前台子 Agent 运行处捕获其 Agent 实例。当前直接取消。
         if self._agent_task and not self._agent_task.done():
-            if self._subagent_task and not self._subagent_task.done():
-                task_id = self.task_manager.adopt_running(
-                    self._subagent_task, "background task"
-                ) if hasattr(self.task_manager, 'adopt_running') else None
-                if task_id:
-                    self._show_system_message(
-                        f"Task moved to background (id: {task_id})"
-                    )
-                    return
             self._agent_task.cancel()
 
-    async def _prefetch_relevant_memories(self, query: str) -> str:
-        """Run the recall selector as a side-query with an 8s timeout.
+    async def _prefetch_relevant_memories(self, query: str, surfaced: set[str] | None = None):
+        """Run memory recall as a side-query.
 
         Creates a fresh LLM client so the selector's system prompt is
-        independent of the main conversation's system prompt. Returns the
-        rendered system-reminder body, or "" on any failure / timeout.
+        independent of the main conversation's system prompt.
+
+        配置了 embedding 时优先走向量召回（无 LLM 调用）；未配置、失败或
+        无结果时回退到 LLM selector。返回 RecallResult，任何失败都返回空结果。
+        surfaced 是已经注入过的记忆路径，由调用方在创建任务时快照传入，
+        避免与 agent.run() 的重置竞争。
         """
+        from lumecode.memory.recall import RecallResult, build_recall_result
+
         if self.memory_manager is None or self._selected_provider is None:
-            return ""
+            return RecallResult(reminder="", paths=[])
 
         provider = self._selected_provider
         user_dir = self.memory_manager.user_mem_dir
         project_dir = self.memory_manager.project_mem_dir
+        already_surfaced = set(surfaced or ())
+
+        recall_span = None
+        if self.telemetry is not None:
+            recall_span = self.telemetry.start_span(
+                SpanKind.MEMORY_RECALL,
+                "memory-recall",
+                parent=self.agent._run_span if self.agent else None,
+                input=query,
+                set_current=False,
+            )
+        selector_usages: list[Usage] = []
 
         async def selector(system_prompt: str, user_message: str) -> str:
             from lumecode.tools.base import StreamEnd, TextDelta
@@ -1259,9 +1399,49 @@ class LumeCodeApp(App):
                 if isinstance(event, TextDelta):
                     collected += event.text
                 elif isinstance(event, StreamEnd):
-                    pass
+                    selector_usages.append(
+                        Usage(
+                            input_tokens=event.input_tokens,
+                            output_tokens=event.output_tokens,
+                            cache_read_tokens=event.cache_read,
+                            cache_creation_tokens=event.cache_creation,
+                        )
+                    )
             return collected
 
+        def finish(result: RecallResult, mode: str) -> RecallResult:
+            if recall_span is not None:
+                recall_span.end(
+                    usage=_sum_usage(selector_usages),
+                    output=result.reminder,
+                    attributes={
+                        "memory.mode": mode,
+                        "memory.selected_count": len(result.paths),
+                        "memory.selected_files": [Path(p).name for p in result.paths],
+                        "memory.injected_chars": len(result.reminder),
+                    },
+                )
+            return result
+
+        # 1) 向量召回（可选）：失败不抛异常，静默回退到 LLM selector。
+        if self.vector_index is not None and self.vector_index.available:
+            try:
+                vector_hits = await asyncio.wait_for(
+                    self.vector_index.search(
+                        query=query,
+                        user_mem_dir=user_dir,
+                        project_mem_dir=project_dir,
+                        already_surfaced=already_surfaced,
+                        top_k=self.vector_index.client.config.top_k,
+                    ),
+                    timeout=8.0,
+                )
+                if vector_hits:
+                    return finish(build_recall_result(vector_hits), "vector")
+            except Exception as e:
+                log.debug("vector memory recall failed, falling back: %s", e)
+
+        # 2) LLM selector 回退。
         try:
             results = await asyncio.wait_for(
                 find_relevant_memories(
@@ -1269,14 +1449,30 @@ class LumeCodeApp(App):
                     user_mem_dir=user_dir,
                     project_mem_dir=project_dir,
                     recent_tools=None,
-                    already_surfaced=None,
+                    already_surfaced=already_surfaced,
                     selector=selector,
                 ),
                 timeout=8.0,
             )
-            return render_reminder(results)
-        except (asyncio.TimeoutError, Exception):
-            return ""
+            return finish(build_recall_result(results), "llm")
+        except Exception as e:
+            if recall_span is not None:
+                recall_span.end(status=SpanStatus.ERROR, error=str(e))
+            return RecallResult(reminder="", paths=[])
+
+    def _build_vector_index(self, work_dir: str) -> Any:
+        """按配置构建记忆向量索引；未配置 embedding 时返回 None（走 LLM 回退）。"""
+        from lumecode.memory.embedding import (
+            INDEX_FILE_NAME,
+            EmbeddingClient,
+            VectorMemoryIndex,
+        )
+
+        cfg: EmbeddingConfig = self._memory_config.embedding
+        if not cfg.enabled:
+            return None
+        index_path = Path(work_dir) / ".lumecode" / "memory" / INDEX_FILE_NAME
+        return VectorMemoryIndex(index_path, EmbeddingClient(cfg))
 
     def _refresh_skills_if_needed(self) -> None:
         """每轮对话前检查 skill 目录 modtime，有变化则自动 reload。"""
@@ -1287,18 +1483,15 @@ class LumeCodeApp(App):
         self.skill_loader.reload()
         if self.command_registry is not None:
             from lumecode.commands.handlers.skill_register import register_skill_commands
-            register_skill_commands(
-                self.command_registry, self.skill_loader, self.skill_executor
-            )
+
+            register_skill_commands(self.command_registry, self.skill_loader, self.skill_executor)
         catalog = self.skill_loader.get_catalog()
         if catalog:
             lines = ["You can use the following Skills:", ""]
             for name, desc in catalog:
                 lines.append(f"- {name}: {desc}")
             lines.append("")
-            lines.append(
-                "If the user's request matches a Skill, call LoadSkill to activate it."
-            )
+            lines.append("If the user's request matches a Skill, call LoadSkill to activate it.")
             self.agent.set_skill_catalog("\n".join(lines))
         else:
             self.agent.set_skill_catalog("")
@@ -1319,14 +1512,22 @@ class LumeCodeApp(App):
             text = expand_at_refs(text, self.agent.work_dir)
 
         # Start memory recall prefetch before UI work.
-        prefetch_task = asyncio.create_task(
-            self._prefetch_relevant_memories(text)
-        ) if text else None
+        prefetch_task = (
+            asyncio.create_task(
+                self._prefetch_relevant_memories(
+                    text,
+                    surfaced=getattr(self.agent, "_surfaced_memory_paths", set()),
+                )
+            )
+            if text
+            else None
+        )
 
         if text:
             user_row = Vertical(classes="user-row")
             await chat.mount(user_row)
             from rich.text import Text as RichText
+
             user_rich = RichText()
             user_rich.append("❯ ", style="bold color(51)")
             user_rich.append(text, style="bold color(255)")
@@ -1334,29 +1535,27 @@ class LumeCodeApp(App):
             await user_row.mount(user_bubble)
             self.call_after_refresh(chat.scroll_end, animate=False)
 
+            # 写穿钩子已把这条用户消息落盘，这里不再单独 append，
+            # 否则会话文件里会出现重复记录。
             self.conversation.add_user_message(text)
-            if self.session:
-                self.session.append(Message(role="user", content=text))
 
         if self._mcp_instructions and not self._mcp_instructions_ok:
             self.conversation.add_system_reminder(self._mcp_instructions)
             self._mcp_instructions_ok = True
 
-        # 非阻塞 memory recall：传给 agent，工具执行后注入
+        # 非阻塞 memory recall：传给 agent，首轮/工具执行后注入
         if prefetch_task is not None:
             self.agent.memory_recall_task = prefetch_task
-            self.agent._memory_recall_consumed = False
-
-        history_cursor = len(self.conversation.history)
 
         # 准备 AI 回复区域
         ai_row = Vertical(classes="ai-row")
         await chat.mount(ai_row)
-        streaming_label = Static("", classes="message ai-message")
-        await ai_row.mount(streaming_label)
+        first_label = Static("", classes="message ai-message")
+        await ai_row.mount(first_label)
+        streaming_label: Static | None = first_label
 
         accumulated_text = ""
-        tool_blocks: dict[str, ToolCallBlock] = {}
+        tool_blocks: dict[str, ToolCallBlock | SubAgentBlock] = {}
 
         # 在聊天区底部启动持续旋转的加载动画
         self._thinking_start = _time.monotonic()
@@ -1385,12 +1584,18 @@ class LumeCodeApp(App):
                     self.call_after_refresh(chat.scroll_end, animate=False)
 
                 elif isinstance(event, StreamText):
-                    if streaming_label is not None and not accumulated_text:
+                    # streaming_label 在工具调用后会被置 None（完成态）；此处
+                    # 下一段文本到来时需重建标签，否则 label.update 会撞 None。
+                    if streaming_label is None:
+                        streaming_label = Static("", classes="message ai-message")
+                        await ai_row.mount(streaming_label)
+                    elif not accumulated_text:
                         await streaming_label.remove()
                         streaming_label = Static("", classes="message ai-message")
                         await ai_row.mount(streaming_label)
                     accumulated_text += event.text
                     from rich.text import Text as RichText
+
                     t = RichText()
                     t.append("✦ ", style="bold color(51)")
                     t.append(accumulated_text)
@@ -1405,6 +1610,7 @@ class LumeCodeApp(App):
                         if streaming_label is not None:
                             await streaming_label.remove()
                         from rich.text import Text as RichText
+
                         prefix = Static(RichText("✦  ", style="bold color(51)"), classes="message")
                         await ai_row.mount(prefix)
                         md = Markdown(accumulated_text, classes="message ai-message")
@@ -1418,17 +1624,17 @@ class LumeCodeApp(App):
                     if _is_subagent_tool(event.tool_name):
                         agent_type = event.arguments.get("subagent_type", "")
                         desc = event.arguments.get("description", "")
-                        block = SubAgentBlock(
+                        new_block: ToolCallBlock | SubAgentBlock = SubAgentBlock(
                             agent_type or "agent",
                             desc,
                             classes="tool-block subagent-block",
                         )
                     else:
-                        block = ToolCallBlock(
+                        new_block = ToolCallBlock(
                             event.tool_name, event.arguments, classes="tool-block"
                         )
-                    await ai_row.mount(block)
-                    tool_blocks[event.tool_id] = block
+                    await ai_row.mount(new_block)
+                    tool_blocks[event.tool_id] = new_block
                     self.call_after_refresh(chat.scroll_end, animate=False)
 
                 elif isinstance(event, PermissionRequest):
@@ -1445,13 +1651,10 @@ class LumeCodeApp(App):
                         await self._handle_askuser(ask_tool._pending_event)
 
                 elif isinstance(event, TurnComplete):
-                    if self.session:
-                        for msg in self.conversation.history[history_cursor:]:
-                            self.session.append(msg)
-                        history_cursor = len(self.conversation.history)
-
+                    # 消息已在 add_* 时通过写穿钩子落盘，这里只处理 UI 收尾。
                     collapsible = [
-                        (tid, blk) for tid, blk in tool_blocks.items()
+                        (tid, blk)
+                        for tid, blk in tool_blocks.items()
                         if isinstance(blk, ToolCallBlock)
                         and blk.tool_name in COLLAPSIBLE_TOOLS
                         and not blk._loading
@@ -1459,7 +1662,8 @@ class LumeCodeApp(App):
                     if len(collapsible) >= 2:
                         total_elapsed = sum(b._elapsed for _, b in collapsible)
                         summary = ToolGroupSummary(
-                            len(collapsible), total_elapsed,
+                            len(collapsible),
+                            total_elapsed,
                             classes="tool-block tool-group-summary",
                         )
                         for _, blk in collapsible:
@@ -1479,19 +1683,12 @@ class LumeCodeApp(App):
 
                 elif isinstance(event, HookEvent):
                     status = "✓" if event.success else "✗"
-                    self._show_system_message(
-                        f"Hook [{event.hook_id}] {status} {event.output}"
-                    )
+                    self._show_system_message(f"Hook [{event.hook_id}] {status} {event.output}")
 
                 elif isinstance(event, CompactNotification):
                     self._show_system_message(event.message)
-                    # auto_compact 已重写 conversation.history（摘要 +
-                    # boundary + 保留尾部）。先持久化 boundary 记录，然后
-                    # 将游标推进到重建后的历史末尾，这样 TurnComplete/LoopComplete
-                    # 刷盘时只追加 boundary 之后的新消息，不会把已压缩的
-                    # 前缀作为普通记录重复写入。
-                    self._persist_compact_boundary(event)
-                    history_cursor = len(self.conversation.history)
+                    # 压缩在 replace_history 时已通过 replace sink 写成 boundary，
+                    # 这里不再补写，也不再需要游标。
 
                 elif isinstance(event, ErrorEvent):
                     # 保留错误前已输出的流式文本
@@ -1511,20 +1708,12 @@ class LumeCodeApp(App):
                     )
                     await ai_row.mount(done_label)
                     if self.session:
-                        for msg in self.conversation.history[history_cursor:]:
-                            self.session.append(msg)
-                        history_cursor = len(self.conversation.history)
                         self.session.meta.total_tokens = (
-                            self.agent.total_input_tokens
-                            + self.agent.total_output_tokens
+                            self.agent.total_input_tokens + self.agent.total_output_tokens
                         )
-                        asyncio.ensure_future(
-                            self._update_session_summary()
-                        )
+                        spawn_background(self._update_session_summary())
                     if self.agent.plan_mode:
-                        asyncio.ensure_future(
-                            self._show_plan_approval()
-                        )
+                        spawn_background(self._show_plan_approval())
 
             # 收尾：渲染剩余的累积文本
             if accumulated_text and streaming_label is not None:
@@ -1546,6 +1735,10 @@ class LumeCodeApp(App):
                 )
                 await ai_row.mount(md)
             self._show_system_message("Operation cancelled")
+            # 清理完界面后必须重新抛出：吞掉 CancelledError 会让本任务以
+            # "正常完成"收尾（task.cancelled() 为 False），破坏 asyncio 的
+            # 取消语义。调用方用 suppress(CancelledError) 兜住即可。
+            raise
         except LLMError as e:
             self._show_error(str(e))
         finally:
@@ -1567,12 +1760,10 @@ class LumeCodeApp(App):
                 f"{status_icon} 后台任务完成: [{task.id}] {task.name} — {task.status}"
             )
 
-            if hasattr(self, 'team_manager'):
+            if hasattr(self, "team_manager"):
                 self.team_manager.on_teammate_completed(task.agent.agent_id)
 
-        self._agent_task = asyncio.create_task(
-            self._send_message("", is_notification=True)
-        )
+        self._agent_task = asyncio.create_task(self._send_message("", is_notification=True))
 
     async def _start_notification_polling(self) -> None:
         while True:
@@ -1591,37 +1782,27 @@ class LumeCodeApp(App):
             return
         for note in notes:
             self.conversation.add_system_reminder(note)
-        self._agent_task = asyncio.create_task(
-            self._send_message("", is_notification=True)
-        )
+        self._agent_task = asyncio.create_task(self._send_message("", is_notification=True))
 
     async def _show_plan_approval(self) -> None:
-        from lumecode.plan_dialog import InlinePlanWidget
 
         chat = self.query_one("#chat-area", VerticalScroll)
         widget = InlinePlanWidget()
         await chat.mount(widget)
         self.call_after_refresh(chat.scroll_end, animate=False)
-        try:
+        with contextlib.suppress(Exception):
             self.query_one("#chat-input").disabled = True
-        except Exception:
-            pass
 
-    def on_inline_plan_widget_responded(
-        self, event: "InlinePlanWidget.Responded"
-    ) -> None:
-        from lumecode.plan_dialog import InlinePlanWidget, PlanChoice
+    def on_inline_plan_widget_responded(self, event: InlinePlanWidget.Responded) -> None:
         from lumecode.prompts import build_plan_mode_exit_reminder
 
-        try:
+        with contextlib.suppress(Exception):
             self.query_one("#plan-inline", InlinePlanWidget).remove()
-        except Exception:
-            pass
         try:
             self.query_one("#chat-input").disabled = False
             self.query_one("#chat-input").focus()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("restore chat input after plan response failed: %s", e)
 
         if self.agent is None:
             return
@@ -1632,10 +1813,8 @@ class LumeCodeApp(App):
         plan_exists = plan_path.exists()
         plan_content = ""
         if plan_exists:
-            try:
+            with contextlib.suppress(Exception):
                 plan_content = plan_path.read_text(encoding="utf-8")
-            except Exception:
-                pass
 
         pre = getattr(self, "_pre_plan_mode", PermissionMode.DEFAULT)
         if choice == PlanChoice.YOLO:
@@ -1665,36 +1844,28 @@ class LumeCodeApp(App):
                 self._show_system_message("Type your feedback and send.")
 
     async def _handle_askuser(self, event: AskUserEvent) -> None:
-        from lumecode.askuser_dialog import InlineAskUserWidget
 
         chat = self.query_one("#chat-area", VerticalScroll)
         widget = InlineAskUserWidget(event.questions)
         self._pending_askuser_event = event
         await chat.mount(widget)
         self.call_after_refresh(chat.scroll_end, animate=False)
-        try:
+        with contextlib.suppress(Exception):
             self.query_one("#chat-input").disabled = True
-        except Exception:
-            pass
 
-    def on_inline_ask_user_widget_responded(
-        self, event: "InlineAskUserWidget.Responded"
-    ) -> None:
-        from lumecode.askuser_dialog import InlineAskUserWidget
+    def on_inline_ask_user_widget_responded(self, event: InlineAskUserWidget.Responded) -> None:
 
         req = getattr(self, "_pending_askuser_event", None)
         if req is not None and not req.future.done():
             req.future.set_result(event.answers if event.answers else {})
             self._pending_askuser_event = None
-        try:
+        with contextlib.suppress(Exception):
             self.query_one("#askuser-inline", InlineAskUserWidget).remove()
-        except Exception:
-            pass
         try:
             self.query_one("#chat-input").disabled = False
             self.query_one("#chat-input").focus()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("restore chat input after askuser response failed: %s", e)
 
     def _start_spinner(self) -> None:
         """启动 braille spinner 动画（每帧 80ms）。"""
@@ -1727,14 +1898,10 @@ class LumeCodeApp(App):
         frame = SPINNER_FRAMES[self._spinner_idx % len(SPINNER_FRAMES)]
         elapsed = _time.monotonic() - self._thinking_start
         if self._spinner_label is not None:
-            self._spinner_label.update(
-                f"  {frame} {self._thinking_verb}…  ({elapsed:.0f}s)"
-            )
+            self._spinner_label.update(f"  {frame} {self._thinking_verb}…  ({elapsed:.0f}s)")
             if self._spinner_idx % 5 == 0:
-                try:
+                with contextlib.suppress(Exception):
                     self.query_one("#chat-area", VerticalScroll).scroll_end(animate=False)
-                except Exception:
-                    pass
 
     def _start_teammate_polling(self) -> None:
         """Start polling teammate progress every 0.5s."""
@@ -1783,11 +1950,10 @@ class LumeCodeApp(App):
                 label.update(f"[cyan]● {count} teammate{'s' if count != 1 else ''}[/cyan]  ")
             else:
                 label.update("")
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("teammates label update failed: %s", e)
 
     async def _handle_permission_request(self, request: PermissionRequest) -> None:
-        from lumecode.permission_dialog import InlinePermissionWidget
 
         chat = self.query_one("#chat-area", VerticalScroll)
         widget = InlinePermissionWidget(request.tool_name, request.description)
@@ -1795,15 +1961,12 @@ class LumeCodeApp(App):
         await chat.mount(widget)
         self.call_after_refresh(chat.scroll_end, animate=False)
         # 权限提示弹窗期间禁用输入框
-        try:
+        with contextlib.suppress(Exception):
             self.query_one("#chat-input").disabled = True
-        except Exception:
-            pass
 
     def on_inline_permission_widget_responded(
-        self, event: "InlinePermissionWidget.Responded"
+        self, event: InlinePermissionWidget.Responded
     ) -> None:
-        from lumecode.permission_dialog import InlinePermissionWidget
 
         req = getattr(self, "_pending_perm_request", None)
         if req is not None:
@@ -1813,14 +1976,14 @@ class LumeCodeApp(App):
         try:
             widget = self.query_one("#perm-inline", InlinePermissionWidget)
             widget.remove()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("remove permission widget failed: %s", e)
         # 重新启用输入框
         try:
             self.query_one("#chat-input").disabled = False
             self.query_one("#chat-input").focus()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("restore chat input after permission response failed: %s", e)
 
     # -----------------------------------------------------------------
     # 恢复 session 的消息渲染
@@ -1858,15 +2021,15 @@ class LumeCodeApp(App):
             return
         try:
             summary = await generate_session_summary(
-                self.client, self.conversation, self.agent.protocol
+                self.client, self.conversation, self.agent.protocol, telemetry=self.telemetry
             )
             if summary:
                 self.session.meta.summary = summary
                 self.session.meta.save(
                     self.session._sessions_dir / f"{self.session.session_id}.meta"
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("session summary persist failed: %s", e)
 
     # -----------------------------------------------------------------
     # MCP
@@ -1902,7 +2065,8 @@ class LumeCodeApp(App):
                 else:
                     # 回退：列出该服务器注册的工具名
                     tool_names = [
-                        t.name for t in self.registry.list_tools()
+                        t.name
+                        for t in self.registry.list_tools()
                         if t.name.startswith(f"mcp__{srv_info.name}__")
                     ]
                     if tool_names:
@@ -1911,17 +2075,14 @@ class LumeCodeApp(App):
             self._mcp_instructions = (
                 "# MCP Server Instructions\n\n"
                 "The following MCP servers have provided instructions "
-                "for how to use their tools and resources:\n\n"
-                + "\n\n".join(parts)
+                "for how to use their tools and resources:\n\n" + "\n\n".join(parts)
             )
 
     async def _shutdown_mcp(self) -> None:
         if self._mcp_init_task is not None:
             self._mcp_init_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._mcp_init_task
-            except (asyncio.CancelledError, Exception):
-                pass
             self._mcp_init_task = None
         if self.mcp_manager is not None:
             await self.mcp_manager.shutdown()
@@ -1941,8 +2102,8 @@ class LumeCodeApp(App):
                 inp = self.query_one("#chat-input", ChatInput)
                 inp.disabled = False
                 inp.focus()
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("restore chat input after interrupt failed: %s", e)
             return
 
         if getattr(self, "_exit_requested", False):
@@ -1954,15 +2115,13 @@ class LumeCodeApp(App):
             tasks: list[asyncio.Task] = []
 
             if self.agent and self.agent.memory_manager:
-                tasks.append(asyncio.create_task(
-                    self.agent._extract_memories(self.conversation)
-                ))
+                tasks.append(asyncio.create_task(self.agent.flush_memories(self.conversation)))
             if self.hook_engine:
-                tasks.append(asyncio.create_task(
-                    self.hook_engine.run_hooks(
-                        "shutdown", HookContext(event_name="shutdown")
+                tasks.append(
+                    asyncio.create_task(
+                        self.hook_engine.run_hooks("shutdown", HookContext(event_name="shutdown"))
                     )
-                ))
+                )
             tasks.append(asyncio.create_task(self._shutdown_mcp()))
 
             if tasks:
@@ -1974,23 +2133,23 @@ class LumeCodeApp(App):
             if self._stale_cleanup_task and not self._stale_cleanup_task.done():
                 self._stale_cleanup_task.cancel()
 
-            if hasattr(self, 'team_manager'):
+            if hasattr(self, "team_manager"):
                 for name in list(self.team_manager._teams):
                     try:
                         team = self.team_manager._teams[name]
                         for m in team.members:
                             team.set_member_active(m.name, False)
                         self.team_manager.delete_team(name)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.debug("team cleanup delete failed: %s", e)
 
             if self.session:
                 self.session.close()
+            if self.telemetry is not None:
+                self.telemetry.close()
 
-        try:
+        with contextlib.suppress(Exception):
             await _cleanup()
-        except Exception:
-            pass
         self.exit()
 
     def _show_error(self, text: str) -> None:
@@ -2005,7 +2164,7 @@ class LumeCodeApp(App):
         chat.mount(msg)
         self.call_after_refresh(chat.scroll_end, animate=False)
 
-    _MODE_DISPLAY = {
+    _MODE_DISPLAY: ClassVar[dict[PermissionMode, str]] = {
         PermissionMode.DEFAULT: "default",
         PermissionMode.ACCEPT_EDITS: "accept-edits",
         PermissionMode.PLAN: "plan",
@@ -2029,8 +2188,8 @@ class LumeCodeApp(App):
                 model_label.update(f"[yellow]MCP connecting…[/yellow]  {model_text}")
             else:
                 model_label.update(model_text)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("model label update failed: %s", e)
 
     def _update_token_label(self, input_tokens: int, output_tokens: int) -> None:
         pass  # token 标签已从 UI 中移除

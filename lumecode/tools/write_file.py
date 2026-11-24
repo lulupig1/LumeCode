@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 from lumecode.tools.base import Tool, ToolResult
+from lumecode.tools.file_io import write_text_file
 
 if TYPE_CHECKING:
     from lumecode.cache import FileCache
@@ -27,12 +27,15 @@ class WriteFile(Tool):
     params_model = Params
     category = "write"
 
-
-    def __init__(self, file_cache: FileCache | None = None, file_history: Any = None, file_state_cache: FileStateCache | None = None) -> None:
+    def __init__(
+        self,
+        file_cache: FileCache | None = None,
+        file_history: Any = None,
+        file_state_cache: FileStateCache | None = None,
+    ) -> None:
         self._cache = file_cache
         self.file_history = file_history
         self._state_cache = file_state_cache
-
 
     async def execute(self, params: Params) -> ToolResult:
         if self.file_history is not None:
@@ -40,15 +43,18 @@ class WriteFile(Tool):
 
         path = Path(params.file_path)
 
+        # 覆盖已有文件时沿用其原有行尾风格（新建文件用 "\n"），避免把
+        # LF 文件改写成 CRLF。
+        newline = "\n"
         if self._state_cache and path.exists():
             resolved = str(path.resolve())
             ok, err_msg = self._state_cache.check(resolved)
             if not ok:
                 return ToolResult(output=err_msg, is_error=True)
+            newline = self._state_cache.newline_for(resolved)
 
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(params.content, encoding="utf-8")
+            write_text_file(path, params.content, newline)
             if self._cache:
                 self._cache.invalidate(str(path.resolve()))
             if self._state_cache:

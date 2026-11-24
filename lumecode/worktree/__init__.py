@@ -1,5 +1,3 @@
-
-
 from lumecode.worktree.changes import (
     Changes,
     CleanupResult,
@@ -11,7 +9,6 @@ from lumecode.worktree.manager import WorktreeError, WorktreeManager
 from lumecode.worktree.models import Worktree, WorktreeSession
 from lumecode.worktree.session import load_worktree_session, save_worktree_session
 from lumecode.worktree.slug import flatten_slug, validate_slug
-
 
 __all__ = [
     "Changes",
@@ -29,4 +26,3 @@ __all__ = [
     "start_stale_cleanup_task",
     "validate_slug",
 ]
-

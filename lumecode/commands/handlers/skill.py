@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -74,6 +73,7 @@ async def _handle_reload(ctx: CommandContext, loader: SkillLoader) -> None:
     registry = ctx.config.get("registry")
     if registry is not None:
         from lumecode.commands.handlers.skill_register import register_skill_commands
+
         register_skill_commands(registry, loader, ctx.config.get("skill_executor"))
 
     # 刷新 agent 的 skill catalog，这样 LLM 能看到新增的 skill
@@ -85,9 +85,7 @@ async def _handle_reload(ctx: CommandContext, loader: SkillLoader) -> None:
             for name, desc in catalog:
                 lines.append(f"- {name}: {desc}")
             lines.append("")
-            lines.append(
-                "If the user's request matches a Skill, call LoadSkill to activate it."
-            )
+            lines.append("If the user's request matches a Skill, call LoadSkill to activate it.")
             agent.set_skill_catalog("\n".join(lines))
         else:
             agent.set_skill_catalog("")

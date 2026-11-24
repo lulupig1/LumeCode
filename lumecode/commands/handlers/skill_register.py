@@ -1,11 +1,11 @@
-
 from __future__ import annotations
 
-import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from lumecode.commands.registry import Command, CommandContext, CommandRegistry, CommandType
+from lumecode.tasks import spawn_background
 
 if TYPE_CHECKING:
     from lumecode.skills.executor import SkillExecutor
@@ -24,9 +24,7 @@ def register_skill_commands(
     for name in list(_REGISTERED_SKILL_NAMES):
         if registry.find(name) is not None:
             registry._commands.pop(name, None)
-            registry._alias_map = {
-                k: v for k, v in registry._alias_map.items() if v != name
-            }
+            registry._alias_map = {k: v for k, v in registry._alias_map.items() if v != name}
         _REGISTERED_SKILL_NAMES.discard(name)
 
     for skill_name, skill_desc in loader.get_catalog():
@@ -36,9 +34,9 @@ def register_skill_commands(
         s_name = skill_name
         s_desc = skill_desc
 
-
-        def make_handler(name: str) -> callable:
-
+        def make_handler(
+            name: str,
+        ) -> Callable[[CommandContext], Awaitable[None]]:
 
             async def handler(ctx: CommandContext) -> None:
                 exe = ctx.config.get("skill_executor") if executor is None else executor
@@ -59,24 +57,17 @@ def register_skill_commands(
                 if skill.mode == "fork":
                     ctx.ui.add_system_message(f"⏳ Running {name} skill...")
 
-
                     async def _run_fork() -> None:
                         try:
                             result = await exe.execute_fork(skill, ctx.args)
-                            ctx.ui.add_system_message(
-                                f"[{name} skill result]\n{result}"
-                            )
+                            ctx.ui.add_system_message(f"[{name} skill result]\n{result}")
                         except Exception as e:
-                            ctx.ui.add_system_message(
-                                f"Skill {name} failed: {e}"
-                            )
+                            ctx.ui.add_system_message(f"Skill {name} failed: {e}")
 
-                    asyncio.create_task(_run_fork())
+                    spawn_background(_run_fork())
                 else:
                     exe.execute_inline(skill, ctx.args)
-                    ctx.ui.add_system_message(
-                        f"skill({name})\nSuccessfully loaded skill"
-                    )
+                    ctx.ui.add_system_message(f"skill({name})\nSuccessfully loaded skill")
                     trigger = ctx.args if ctx.args else f"/{name}"
                     ctx.ui.send_user_message(trigger)
 

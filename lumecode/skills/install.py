@@ -2,21 +2,20 @@ from __future__ import annotations
 
 import base64
 import logging
-import os
 import re
 import shutil
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse, quote
+from urllib.parse import quote, urlparse
 
 import httpx
 
 log = logging.getLogger(__name__)
 
 # --- 安全限制：防止恶意 / 错误 URL 拉取过多数据 ---
-MAX_FILE_SIZE = 1 << 20       # 单文件 1 MiB
-MAX_TOTAL_SIZE = 8 << 20      # 整个 skill 8 MiB
+MAX_FILE_SIZE = 1 << 20  # 单文件 1 MiB
+MAX_TOTAL_SIZE = 8 << 20  # 整个 skill 8 MiB
 MAX_FILE_COUNT = 64
 MAX_RECURSION_DEPTH = 4
 HTTP_TIMEOUT = 30.0
@@ -31,20 +30,23 @@ GITHUB_API_BASE = "https://api.github.com"
 # 数据结构
 # ------------------------------------------------------------------
 
+
 @dataclass
 class SkillSource:
     """解析后的 skill 来源信息，最终统一走 GitHub Contents API 拉取。"""
+
     owner: str
     repo: str
-    ref: str            # 分支或 tag，默认 "main"
-    subpath: str        # 仓库内 skill 目录的路径（无尾 /）
-    name: str           # skill 名称（subpath 最后一段）
-    original: str       # 用户原始 URL
+    ref: str  # 分支或 tag，默认 "main"
+    subpath: str  # 仓库内 skill 目录的路径（无尾 /）
+    name: str  # skill 名称（subpath 最后一段）
+    original: str  # 用户原始 URL
 
 
 @dataclass
 class InstallReport:
     """安装完成后的汇报信息。"""
+
     skill_name: str = ""
     target_dir: str = ""
     file_count: int = 0
@@ -54,6 +56,7 @@ class InstallReport:
 # ------------------------------------------------------------------
 # URL 解析：支持三种格式
 # ------------------------------------------------------------------
+
 
 def parse_skill_url(raw: str) -> SkillSource:
     """将用户提供的 URL 解析为 SkillSource。
@@ -126,12 +129,14 @@ def parse_skill_url(raw: str) -> SkillSource:
 # GitHub Contents API 拉取
 # ------------------------------------------------------------------
 
+
 @dataclass
 class _ContentEntry:
     """GitHub Contents API 返回的单条条目。"""
+
     name: str
     path: str
-    type: str          # "file" | "dir" | "symlink" | "submodule"
+    type: str  # "file" | "dir" | "symlink" | "submodule"
     download_url: str | None = None
     content: str | None = None
     encoding: str | None = None
@@ -169,23 +174,17 @@ async def _list_contents(
     }
     resp = await client.get(url, headers=headers)
     if resp.status_code == 403:
-        raise RuntimeError(
-            f"github API forbidden (rate-limited?): {resp.text[:512].strip()}"
-        )
+        raise RuntimeError(f"github API forbidden (rate-limited?): {resp.text[:512].strip()}")
     if resp.status_code != 200:
         raise RuntimeError(f"github API returned {resp.status_code} for {url}")
 
     return _parse_entries(resp.json())
 
 
-async def _fetch_blob(
-    client: httpx.AsyncClient, entry: _ContentEntry
-) -> bytes:
+async def _fetch_blob(client: httpx.AsyncClient, entry: _ContentEntry) -> bytes:
     """下载单个文件内容。优先用内联 base64，回退到 download_url。"""
     if entry.size > MAX_FILE_SIZE:
-        raise RuntimeError(
-            f"file {entry.path} too large: {entry.size} bytes (max {MAX_FILE_SIZE})"
-        )
+        raise RuntimeError(f"file {entry.path} too large: {entry.size} bytes (max {MAX_FILE_SIZE})")
     # 内联 base64（小文件时 API 直接返回内容，省一次请求）
     if entry.encoding == "base64" and entry.content:
         clean = entry.content.replace("\n", "")
@@ -203,6 +202,7 @@ async def _fetch_blob(
 # ------------------------------------------------------------------
 # 递归下载 + 安全校验
 # ------------------------------------------------------------------
+
 
 async def _walk_and_download(
     client: httpx.AsyncClient,
@@ -230,18 +230,14 @@ async def _walk_and_download(
         if entry.type == "file":
             data = await _fetch_blob(client, entry)
             if report.total_bytes + len(data) > MAX_TOTAL_SIZE:
-                raise RuntimeError(
-                    f"install total size limit ({MAX_TOTAL_SIZE} bytes) reached"
-                )
+                raise RuntimeError(f"install total size limit ({MAX_TOTAL_SIZE} bytes) reached")
             target.write_bytes(data)
             report.file_count += 1
             report.total_bytes += len(data)
 
         elif entry.type == "dir":
             target.mkdir(parents=True, exist_ok=True)
-            await _walk_and_download(
-                client, src, entry.path, target, report, depth + 1
-            )
+            await _walk_and_download(client, src, entry.path, target, report, depth + 1)
         # symlink / submodule 直接跳过
 
 
@@ -257,9 +253,7 @@ def _validate_skill_name(name: str) -> None:
     if name.startswith("."):
         raise ValueError("skill name cannot start with '.'")
     if not _VALID_NAME_RE.match(name):
-        raise ValueError(
-            f"skill name {name!r} contains invalid characters (use a-z 0-9 - _)"
-        )
+        raise ValueError(f"skill name {name!r} contains invalid characters (use a-z 0-9 - _)")
 
 
 def user_skills_root() -> Path:
@@ -272,6 +266,7 @@ def user_skills_root() -> Path:
 # ------------------------------------------------------------------
 # 安装主流程
 # ------------------------------------------------------------------
+
 
 async def install_skill(
     src: SkillSource,
@@ -297,7 +292,8 @@ async def install_skill(
 
         # 校验：下载的目录里必须有 skill manifest
         if not _has_skill_manifest(staging):
-            raise RuntimeError(
+            # 故意在 try 内 raise：由外层 except 负责清理 staging 目录
+            raise RuntimeError(  # noqa: TRY301
                 "downloaded tree missing SKILL.md or skill.yaml — not a skill?"
             )
 

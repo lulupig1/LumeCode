@@ -1,4 +1,3 @@
-﻿
 from __future__ import annotations
 
 from lumecode.tools.diff import build_diff

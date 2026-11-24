@@ -1,4 +1,3 @@
-﻿
 # 回归测试：Coordinator Mode 在多 Team 场景下的工具限制/恢复行为，
 # 覆盖 team_create.py / team_delete.py 里曾经出现过的两个 bug：
 # 1. 存在多个 Team 时，删除其中一个不应该提前恢复全部工具；
@@ -12,10 +11,10 @@ from unittest.mock import MagicMock
 
 from lumecode.teams.manager import TeamManager
 from lumecode.teams.models import resolve_team_dir
-from lumecode.tools.team_create import TeamCreateTool, TeamCreateParams
-from lumecode.tools.team_delete import TeamDeleteTool, TeamDeleteParams
 from lumecode.tools import ToolRegistry
 from lumecode.tools.base import Tool, ToolResult
+from lumecode.tools.team_create import TeamCreateParams, TeamCreateTool
+from lumecode.tools.team_delete import TeamDeleteParams, TeamDeleteTool
 
 
 class DummyTool(Tool):
@@ -65,7 +64,13 @@ def test_deleting_one_of_two_teams_should_not_restore_full_tools():
         full_registry = make_registry("Agent", "WriteFile", "EditFile", "Bash")
         agent = FakeAgent(full_registry)
 
-        create = TeamCreateTool(tm, agent, teammate_mode="in-process", is_interactive=False, enable_coordinator_mode=True)
+        create = TeamCreateTool(
+            tm,
+            agent,
+            teammate_mode="in-process",
+            is_interactive=False,
+            enable_coordinator_mode=True,
+        )
         r1 = asyncio.run(create.execute(TeamCreateParams(team_name="coordbug1")))
         assert not r1.is_error
         assert agent.coordinator_mode is True
@@ -95,7 +100,13 @@ def test_second_team_create_does_not_corrupt_full_registry_snapshot():
         full_registry = make_registry("Agent", "WriteFile", "EditFile", "Bash")
         agent = FakeAgent(full_registry)
 
-        create = TeamCreateTool(tm, agent, teammate_mode="in-process", is_interactive=False, enable_coordinator_mode=True)
+        create = TeamCreateTool(
+            tm,
+            agent,
+            teammate_mode="in-process",
+            is_interactive=False,
+            enable_coordinator_mode=True,
+        )
         asyncio.run(create.execute(TeamCreateParams(team_name="coordbug3")))
         asyncio.run(create.execute(TeamCreateParams(team_name="coordbug4")))
 

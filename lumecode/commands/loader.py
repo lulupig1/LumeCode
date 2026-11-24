@@ -1,4 +1,3 @@
-
 """从 .lumecode/commands/ 目录加载自定义 Markdown 命令（对齐 Go 版 loader.go）。
 
 每个 .md 文件对应一个 prompt 类型命令，文件名（去掉后缀、小写化）即命令名。
@@ -51,6 +50,7 @@ def _make_prompt_handler(body: str):
     支持 $ARGUMENTS 占位符替换；若正文没有占位符且用户给了参数，
     追加 "## User Request" 段落。
     """
+
     async def handler(ctx: CommandContext) -> None:
         if "$ARGUMENTS" in body:
             result = body.replace("$ARGUMENTS", ctx.args)

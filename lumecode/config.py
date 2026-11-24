@@ -8,15 +8,11 @@ from pathlib import Path
 import yaml
 
 from .validator import (
-    ConfigError,
     DEFAULT_CONTEXT_WINDOW,
-    VALID_PERMISSION_MODES,
-    VALID_PROTOCOLS,
-    VALID_TEAMMATE_MODES,
+    ConfigError,
     lookup_model_context_window,
     validate_config_structure,
 )
-
 
 _ENV_KEY_MAP = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -83,12 +79,12 @@ class ProviderConfig:
     def get_context_window(self) -> int:
         """通过四层 fallback 解析模型的 context window，按优先级从高到低：
 
-          1. 配置文件提供的 context_window（> 0）——显式覆盖，永远优先。
-          2. 从 provider 的 /v1/models 端点自动拉取并通过 set_fetched_context_window
-             缓存的值（只有 anthropic 协议的 provider 才会设置它；拉取失败或缺失时
-             保持为 0 并跳过）。
-          3. 内置的「模型名 -> window」映射表（按子串匹配）。
-          4. 保守的默认值（claude -> 200000，其他 -> 128000）。
+        1. 配置文件提供的 context_window（> 0）——显式覆盖，永远优先。
+        2. 从 provider 的 /v1/models 端点自动拉取并通过 set_fetched_context_window
+           缓存的值（只有 anthropic 协议的 provider 才会设置它；拉取失败或缺失时
+           保持为 0 并跳过）。
+        3. 内置的「模型名 -> window」映射表（按子串匹配）。
+        4. 保守的默认值（claude -> 200000，其他 -> 128000）。
         """
         if self.context_window > 0:
             return self.context_window
@@ -132,7 +128,6 @@ class MCPServerConfig:
     headers: dict[str, str] = field(default_factory=dict)
     env: dict[str, str] = field(default_factory=dict)
 
-
     @property
     def is_stdio(self) -> bool:
         return self.command is not None
@@ -140,7 +135,9 @@ class MCPServerConfig:
 
 @dataclass
 class WorktreeConfig:
-    symlink_directories: list[str] = field(default_factory=lambda: ["node_modules", ".venv", "vendor"])
+    symlink_directories: list[str] = field(
+        default_factory=lambda: ["node_modules", ".venv", "vendor"]
+    )
     stale_cleanup_interval: int = 3600
     stale_cutoff_hours: int = 24
 
@@ -148,9 +145,42 @@ class WorktreeConfig:
 @dataclass
 class SandboxAppConfig:
     """沙箱相关的配置项。"""
-    enabled: bool = False         # 是否启用 OS 级沙箱
-    auto_allow: bool = False      # 是否自动放行命令（沙箱兜底）
+
+    enabled: bool = False  # 是否启用 OS 级沙箱
+    auto_allow: bool = False  # 是否自动放行命令（沙箱兜底）
     network_enabled: bool = False  # 沙箱内是否允许网络访问
+
+
+@dataclass
+class EmbeddingConfig:
+    """记忆向量召回使用的 embedding 端点（OpenAI 兼容 /v1/embeddings）。
+
+    未配置时 memory 召回回退到现有的 LLM selector。
+    """
+
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
+    dimensions: int = 0  # 0 = 使用模型默认维度
+    top_k: int = 5
+    min_score: float = 0.45
+    # 部分供应商（如 DashScope text-embedding-v3）区分 query/document 输入；
+    # 默认不发送该参数，避免 OpenAI 等只接受 model/input 的供应商报错。
+    uses_text_type: bool = False
+
+    def resolve_api_key(self) -> str:
+        return resolve_env_vars(self.api_key) if self.api_key else ""
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.base_url and self.model)
+
+
+@dataclass
+class MemoryAppConfig:
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    # 每 N 轮对话触发一次记忆提取；0 = 只在会话结束/退出时提取。
+    extraction_interval: int = 4
 
 
 @dataclass
@@ -165,6 +195,7 @@ class AppConfig:
     teammate_mode: str = ""
     enable_coordinator_mode: bool = False
     sandbox: SandboxAppConfig = field(default_factory=SandboxAppConfig)
+    memory: MemoryAppConfig = field(default_factory=MemoryAppConfig)
 
 
 def _load_single_file(path: Path) -> AppConfig:
@@ -215,6 +246,21 @@ def _load_single_file(path: Path) -> AppConfig:
         network_enabled=sb["network_enabled"],
     )
 
+    mem = validated["memory"]
+    emb = mem["embedding"]
+    memory_cfg = MemoryAppConfig(
+        extraction_interval=mem.get("extraction_interval", 4),
+        embedding=EmbeddingConfig(
+            base_url=emb.get("base_url", ""),
+            model=emb.get("model", ""),
+            api_key=emb.get("api_key", ""),
+            dimensions=emb.get("dimensions", 0),
+            top_k=emb.get("top_k", 5),
+            min_score=emb.get("min_score", 0.45),
+            uses_text_type=emb.get("uses_text_type", False),
+        ),
+    )
+
     return AppConfig(
         providers=providers,
         permission_mode=validated["permission_mode"],
@@ -226,6 +272,7 @@ def _load_single_file(path: Path) -> AppConfig:
         teammate_mode=validated["teammate_mode"],
         enable_coordinator_mode=validated["enable_coordinator_mode"],
         sandbox=sandbox_cfg,
+        memory=memory_cfg,
     )
 
 
@@ -260,6 +307,9 @@ def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
         base.sandbox.auto_allow = True
     if override.sandbox.network_enabled:
         base.sandbox.network_enabled = True
+    # embedding 配置整体覆盖：配置了的层（任意字段非空）优先。
+    if override.memory.embedding.enabled:
+        base.memory.embedding = override.memory.embedding
     return base
 
 

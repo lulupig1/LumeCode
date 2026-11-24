@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -59,4 +58,3 @@ def load_worktree_session(lumecode_dir: Path) -> WorktreeSession | None:
     except (json.JSONDecodeError, KeyError) as e:
         log.warning("Failed to load worktree session: %s", e)
         return None
-

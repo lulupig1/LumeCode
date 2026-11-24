@@ -28,7 +28,6 @@ class Rule:
     pattern: str
     effect: Effect
 
-
     def matches(self, tool_name: str, content: str) -> bool:
         if self.tool_name != tool_name:
             return False
@@ -74,8 +73,6 @@ def _load_rules_file(path: Path) -> list[Rule]:
 
 
 class RuleEngine:
-
-
     def __init__(
         self,
         user_rules_path: Path | None = None,
@@ -92,14 +89,12 @@ class RuleEngine:
             tiers.append(_load_rules_file(p) if p else [])
         return tiers
 
-
     def evaluate(self, tool_name: str, content: str) -> Effect | None:
         for rules in self._load_tiers():
             for rule in reversed(rules):
                 if rule.matches(tool_name, content):
                     return rule.effect
         return None
-
 
     def append_local_rule(self, rule: Rule) -> None:
         if self._local_path is None:

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -8,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from lumecode.process import spawn_kwargs, terminate_process_tree
 from lumecode.tools.base import Tool, ToolResult
 
 if TYPE_CHECKING:
@@ -15,18 +15,23 @@ if TYPE_CHECKING:
 
 MAX_TIMEOUT = 600
 
+# 单次命令输出的字节上限。超出后继续排空管道（防止子进程写满管道阻塞），
+# 但只保留前 MAX_OUTPUT_BYTES 字节，避免一条 `yes` 把内存打爆。
+MAX_OUTPUT_BYTES = 1_000_000
+_READ_CHUNK = 65536
+
 # 特殊命令的退出码语义映射
 # 这些命令的 exit code 1 不代表错误，只有 >= 阈值才算真正的错误
 # 例如 grep 返回 1 仅表示"没有匹配行"，不是执行出错
 _COMMAND_ERROR_THRESHOLDS: dict[str, int] = {
-    "grep": 2,   # exit 1 = 没有匹配到内容
+    "grep": 2,  # exit 1 = 没有匹配到内容
     "egrep": 2,
     "fgrep": 2,
-    "rg": 2,     # ripgrep，与 grep 语义一致
-    "diff": 2,   # exit 1 = 文件内容有差异
-    "find": 2,   # exit 1 = 部分成功（如权限不足跳过某些目录）
-    "test": 2,   # exit 1 = 条件为假
-    "[": 2,      # test 的别名形式
+    "rg": 2,  # ripgrep，与 grep 语义一致
+    "diff": 2,  # exit 1 = 文件内容有差异
+    "find": 2,  # exit 1 = 部分成功（如权限不足跳过某些目录）
+    "test": 2,  # exit 1 = 条件为假
+    "[": 2,  # test 的别名形式
 }
 
 
@@ -54,8 +59,7 @@ def _extract_last_command_name(command: str) -> str | None:
         if re.match(r"^[A-Za-z_]\w*=", token):
             continue
         # 取 basename（去掉路径前缀，如 /usr/bin/grep → grep）
-        base = token.rsplit("/", maxsplit=1)[-1]
-        return base
+        return token.rsplit("/", maxsplit=1)[-1]
 
     return None
 
@@ -104,6 +108,30 @@ def _exit_code_hint(command: str, exit_code: int) -> str:
     return f"Exit code {exit_code}"
 
 
+async def _read_capped(stream: asyncio.StreamReader | None, limit: int) -> tuple[bytes, bool]:
+    """读取 *stream* 直到 EOF，最多保留 *limit* 字节。
+
+    即使已经达到上限也继续把管道读空，否则子进程会因管道写满而永久阻塞。
+    返回 (数据, 是否被截断)。
+    """
+    if stream is None:
+        return b"", False
+    buf = bytearray()
+    truncated = False
+    while True:
+        chunk = await stream.read(_READ_CHUNK)
+        if not chunk:
+            break
+        if len(buf) < limit:
+            remaining = limit - len(buf)
+            buf.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                truncated = True
+        else:
+            truncated = True
+    return bytes(buf), truncated
+
+
 class Params(BaseModel):
     command: str = Field(description="Shell command to execute")
     timeout: int = Field(default=120, description="Timeout in seconds (max 600)")
@@ -130,23 +158,34 @@ class Bash(Tool):
         if self.sandbox and self.sandbox_config and self.sandbox.available():
             actual_command = self.sandbox.wrap(params.command, self.sandbox_config)
 
+        # 让子进程独立成组/会话，超时才能整组终止
         try:
             proc = await asyncio.create_subprocess_shell(
                 actual_command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,  # 合并 stderr 到 stdout
                 cwd=self.work_dir,
+                **spawn_kwargs(),
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
+        except Exception as e:
+            return ToolResult(output=f"Error executing command: {e}", is_error=True)
+
+        try:
+            stdout, truncated = await asyncio.wait_for(
+                _read_capped(proc.stdout, MAX_OUTPUT_BYTES), timeout=timeout
+            )
             await proc.wait()
+        except TimeoutError:
+            await terminate_process_tree(proc)
             return ToolResult(output=f"Error: command timed out after {timeout}s", is_error=True)
         except Exception as e:
+            await terminate_process_tree(proc)
             return ToolResult(output=f"Error executing command: {e}", is_error=True)
 
         # 合并流输出，不再区分 stdout/stderr
         output = stdout.decode(errors="replace") if stdout else ""
+        if truncated:
+            output += "\n… (output truncated: exceeds the output size limit)"
 
         # 非零退出码时追加退出码信息，但 is_error 始终为 False
         # 只有超时和异常才设置 is_error=True
@@ -162,4 +201,3 @@ class Bash(Tool):
             output = "(no output)"
 
         return ToolResult(output=output, is_error=False)
-

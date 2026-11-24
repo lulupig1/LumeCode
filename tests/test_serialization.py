@@ -1,10 +1,11 @@
-﻿"""针对各 provider 序列化构建器的单元测试。
+"""针对各 provider 序列化构建器的单元测试。
 
 会话层与具体 provider 无关；序列化逻辑位于 lumecode.serialization。
 这些测试用于锁定各种线上传输格式（wire format），更关键的是锁定
 Extended Thinking 的往返（round-trip）契约：带 tool-use 的这一轮必须把它
 带签名的 thinking block 一并回传给 API（否则 Anthropic 会返回 400）。
 """
+
 from __future__ import annotations
 
 from lumecode.conversation import (
@@ -38,7 +39,9 @@ def test_anthropic_preserves_signed_thinking_at_head():
 
 def test_anthropic_tool_results_become_user_blocks():
     conv = ConversationManager()
-    conv.add_tool_results_message([ToolResultBlock(tool_use_id="tu-1", content="out", is_error=False)])
+    conv.add_tool_results_message(
+        [ToolResultBlock(tool_use_id="tu-1", content="out", is_error=False)]
+    )
     msgs = build_anthropic_messages(conv.get_messages())
     assert msgs[0]["role"] == "user"
     assert msgs[0]["content"][0]["type"] == "tool_result"

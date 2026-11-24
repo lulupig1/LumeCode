@@ -1,8 +1,7 @@
-
 from __future__ import annotations
 
 import secrets
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -14,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class EnterWorktreeParams(BaseModel):
-    name: Optional[str] = Field(
+    name: str | None = Field(
         default=None,
         description=(
             'Optional name for the worktree. Each "/"-separated segment may '
@@ -26,23 +25,17 @@ class EnterWorktreeParams(BaseModel):
 
 class EnterWorktreeTool(Tool):
     name = "EnterWorktree"
-    description = (
-        "Creates an isolated worktree (via git) and switches the session into it"
-    )
+    description = "Creates an isolated worktree (via git) and switches the session into it"
     params_model = EnterWorktreeParams
     category = "command"
     should_defer = True
 
-
     def __init__(self, worktree_manager: WorktreeManager) -> None:
         self._manager = worktree_manager
 
-
     async def execute(self, params: EnterWorktreeParams) -> ToolResult:
         if self._manager.get_current_session() is not None:
-            return ToolResult(
-                output="Already in a worktree session", is_error=True
-            )
+            return ToolResult(output="Already in a worktree session", is_error=True)
 
         slug = params.name or f"wt-{secrets.token_hex(4)}"
 
@@ -54,9 +47,7 @@ class EnterWorktreeTool(Tool):
             wt = await self._manager.create(slug)
             session = await self._manager.enter(slug)
         except Exception as e:
-            return ToolResult(
-                output=f"Error creating worktree: {e}", is_error=True
-            )
+            return ToolResult(output=f"Error creating worktree: {e}", is_error=True)
 
         branch_info = f" on branch {wt.branch}" if wt.branch else ""
         return ToolResult(

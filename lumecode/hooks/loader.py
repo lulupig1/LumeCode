@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from lumecode.hooks.conditions import ConditionParseError, parse_condition
@@ -60,21 +59,16 @@ def load_hooks(raw_hooks: list[dict] | None) -> list[Hook]:
         for field_name in required:
             if not raw_action.get(field_name):
                 raise HookConfigError(
-                    f"{label}: action type '{action_type}' requires "
-                    f"'{field_name}' field"
+                    f"{label}: action type '{action_type}' requires '{field_name}' field"
                 )
 
         reject = bool(entry.get("reject", False))
         if reject and event != "pre_tool_use":
-            raise HookConfigError(
-                f"{label}: 'reject' can only be used with 'pre_tool_use' event"
-            )
+            raise HookConfigError(f"{label}: 'reject' can only be used with 'pre_tool_use' event")
 
         async_exec = bool(entry.get("async", False))
         if async_exec and event == "pre_tool_use":
-            raise HookConfigError(
-                f"{label}: 'async' cannot be used with 'pre_tool_use' event"
-            )
+            raise HookConfigError(f"{label}: 'async' cannot be used with 'pre_tool_use' event")
 
         condition = None
         raw_if = entry.get("if")
@@ -115,4 +109,3 @@ def load_hooks(raw_hooks: list[dict] | None) -> list[Hook]:
         )
 
     return hooks
-

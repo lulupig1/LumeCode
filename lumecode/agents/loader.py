@@ -13,8 +13,6 @@ USER_AGENTS_DIR = "~/.lumecode/agents"
 
 
 class AgentLoader:
-
-
     def __init__(
         self,
         work_dir: str,
@@ -23,7 +21,6 @@ class AgentLoader:
         self._work_dir = work_dir
         self._enable_verification = enable_verification
         self._agents: dict[str, AgentDef] = {}
-
 
     def _scan_directory(self, path: Path, source: str) -> list[AgentDef]:
         results: list[AgentDef] = []
@@ -42,7 +39,6 @@ class AgentLoader:
                 log.warning("Skipping agent file %s: %s", entry, e)
         return results
 
-
     def _load_builtins(self) -> list[AgentDef]:
         results: list[AgentDef] = []
         try:
@@ -56,7 +52,7 @@ class AgentLoader:
                 continue
             try:
                 raw = item.read_text(encoding="utf-8")
-                from lumecode.agents.parser import parse_frontmatter, _validate_agent_meta
+                from lumecode.agents.parser import _validate_agent_meta, parse_frontmatter
 
                 meta, body = parse_frontmatter(raw)
                 _validate_agent_meta(meta, item.name)
@@ -75,10 +71,7 @@ class AgentLoader:
                     source="builtin",
                 )
 
-                if (
-                    agent_def.agent_type == "Verification"
-                    and not self._enable_verification
-                ):
+                if agent_def.agent_type == "Verification" and not self._enable_verification:
                     continue
 
                 results.append(agent_def)
@@ -112,7 +105,6 @@ class AgentLoader:
         self._agents = seen
         return seen
 
-
     def get(self, agent_type: str) -> AgentDef | None:
         cached = self._agents.get(agent_type)
         if cached is None:
@@ -133,11 +125,8 @@ class AgentLoader:
                 )
         return cached
 
-
     def list_agents(self) -> list[tuple[str, str]]:
-        return [
-            (ad.agent_type, ad.when_to_use) for ad in self._agents.values()
-        ]
+        return [(ad.agent_type, ad.when_to_use) for ad in self._agents.values()]
 
     def register_plugin_source(self, path: Path) -> None:
         pass

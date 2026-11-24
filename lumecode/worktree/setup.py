@@ -102,8 +102,12 @@ def _copy_ignored_files(root: Path, wt: Path) -> None:
     try:
         result = subprocess.run(
             [
-                "git", "ls-files",
-                "--others", "--ignored", "--exclude-standard", "--directory",
+                "git",
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
             ],
             cwd=str(root),
             capture_output=True,

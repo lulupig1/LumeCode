@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -32,7 +31,7 @@ class TeamCreateTool(Tool):
         "2. **Spawn teammates** using the Agent tool with team_name and name parameters "
         "— this is REQUIRED to create long-running team members\n"
         "3. Teammates work independently and communicate via **SendMessage**\n"
-        "4. When a teammate finishes, it sends its result to \"lead\" via SendMessage, then goes idle\n"
+        '4. When a teammate finishes, it sends its result to "lead" via SendMessage, then goes idle\n'
         "5. The lead collects and synthesizes all teammate results\n\n"
         "## CRITICAL: Spawning Teammates\n\n"
         "To add a member to a team, you MUST pass both team_name and name to the Agent tool:\n"
@@ -56,7 +55,6 @@ class TeamCreateTool(Tool):
     category = "command"
     is_concurrency_safe = False
 
-
     def __init__(
         self,
         team_manager: TeamManager,
@@ -71,16 +69,13 @@ class TeamCreateTool(Tool):
         self._is_interactive = is_interactive
         self._enable_coordinator_mode = enable_coordinator_mode
 
-
     async def execute(self, params: BaseModel) -> ToolResult:
         p: TeamCreateParams = params  # type: ignore[assignment]
 
         from lumecode.teams.backend_detect import BackendDetectionError
 
         try:
-            backend = self._team_manager.detect_backend(
-                self._teammate_mode, self._is_interactive
-            )
+            backend = self._team_manager.detect_backend(self._teammate_mode, self._is_interactive)
         except BackendDetectionError as e:
             return ToolResult(output=str(e), is_error=True)
 
@@ -97,8 +92,10 @@ class TeamCreateTool(Tool):
 
         coordinator_note = ""
         from lumecode.teams.coordinator import is_coordinator_mode
+
         if is_coordinator_mode(self._enable_coordinator_mode):
             from lumecode.agents.tool_filter import apply_coordinator_filter
+
             self._parent_agent._team_manager = self._team_manager
             if not self._parent_agent.coordinator_mode:
                 # 只在从"未限制"切换到"限制"时才保存全量注册表快照，

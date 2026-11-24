@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from textual.app import ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Vertical
 from textual.message import Message
 from textual.widgets import Static
 
 from lumecode.agent import PermissionResponse
-
 
 _PERM_OPTIONS = [
     ("Yes", PermissionResponse.ALLOW),
@@ -23,7 +24,7 @@ class InlinePermissionWidget(Vertical, can_focus=True):
     选项，支持方向键导航 + 回车确认。
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("up", "cursor_up", "Up", priority=True),
         Binding("down", "cursor_down", "Down", priority=True),
         Binding("enter", "select", "Select", priority=True),
@@ -31,8 +32,6 @@ class InlinePermissionWidget(Vertical, can_focus=True):
     ]
 
     class Responded(Message):
-
-
         def __init__(self, response: PermissionResponse) -> None:
             super().__init__()
             self.response = response
@@ -45,7 +44,6 @@ class InlinePermissionWidget(Vertical, can_focus=True):
 
     def compose(self) -> ComposeResult:
         yield Static(self._build_content(), id="perm-content")
-
 
     def on_mount(self) -> None:
         self.focus()
@@ -65,7 +63,6 @@ class InlinePermissionWidget(Vertical, can_focus=True):
 
         return "\n".join(lines)
 
-
     def _refresh(self) -> None:
         content = self.query_one("#perm-content", Static)
         content.update(self._build_content())
@@ -83,7 +80,6 @@ class InlinePermissionWidget(Vertical, can_focus=True):
     def action_select(self) -> None:
         _, response = _PERM_OPTIONS[self._cursor]
         self.post_message(self.Responded(response))
-
 
     def action_deny(self) -> None:
         self.post_message(self.Responded(PermissionResponse.DENY))

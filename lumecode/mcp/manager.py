@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ServerInfo:
     """单个 MCP 服务器的连接信息，包含名称和 instructions。"""
+
     name: str
     instructions: str = ""
 
@@ -22,23 +23,20 @@ class ServerInfo:
 @dataclass
 class ConnectResult:
     """ConnectAll 的返回结果，包含已注册工具、服务器信息和错误列表。"""
+
     tools: list[Tool] = field(default_factory=list)
     servers: list[ServerInfo] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
 class MCPManager:
-
-
     def __init__(self) -> None:
         self._configs: dict[str, MCPServerConfig] = {}
         self._clients: dict[str, MCPClient] = {}
 
-
     def load_configs(self, configs: list[MCPServerConfig]) -> None:
         for cfg in configs:
             self._configs[cfg.name] = cfg
-
 
     async def connect_all(self) -> ConnectResult:
         """连接所有已加载的 MCP 服务器，返回工具列表、服务器信息和错误。
@@ -82,7 +80,6 @@ class MCPManager:
             registry.register(tool)
         return result
 
-
     async def get_client(self, name: str) -> MCPClient | None:
         client = self._clients.get(name)
         if client is None:
@@ -102,7 +99,6 @@ class MCPManager:
             self._clients[name] = client
 
         return client
-
 
     async def shutdown(self) -> None:
         for name, client in self._clients.items():

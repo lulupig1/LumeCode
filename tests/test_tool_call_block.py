@@ -1,4 +1,3 @@
-﻿
 from __future__ import annotations
 
 from lumecode.app import ToolCallBlock, _format_detail

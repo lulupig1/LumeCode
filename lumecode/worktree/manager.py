@@ -4,13 +4,10 @@ import asyncio
 import logging
 import os
 import subprocess
-import time
-from datetime import datetime
 from pathlib import Path
 
 from lumecode.worktree.changes import (
     CleanupResult,
-    Changes,
     count_worktree_changes,
     has_worktree_changes,
 )
@@ -37,9 +34,7 @@ class WorktreeManager:
     ) -> None:
         self.repo_root = repo_root
         self.symlink_directories = symlink_directories or []
-        self.worktree_dir = worktree_dir or str(
-            Path(repo_root) / ".lumecode" / "worktrees"
-        )
+        self.worktree_dir = worktree_dir or str(Path(repo_root) / ".lumecode" / "worktrees")
         self._lumecode_dir = Path(repo_root) / ".lumecode"
         self._lock = asyncio.Lock()
         self.active: dict[str, Worktree] = {}
@@ -48,7 +43,7 @@ class WorktreeManager:
     def _run_git(self, args: list[str], cwd: str | None = None) -> subprocess.CompletedProcess[str]:
         env = {**os.environ, **GIT_ENV}
         return subprocess.run(
-            ["git"] + args,
+            ["git", *args],
             cwd=cwd or self.repo_root,
             capture_output=True,
             text=True,
@@ -56,6 +51,17 @@ class WorktreeManager:
             stdin=subprocess.DEVNULL,
             env=env,
         )
+
+    async def _run_git_async(
+        self, args: list[str], cwd: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """``_run_git`` 的异步版本。
+
+        ``subprocess.run`` 是阻塞调用，而 ``git worktree add`` 这类操作可能要
+        跑几十秒。直接在 async 方法里调用会**卡住整个事件循环**（TUI 失去响应、
+        其它工具无法执行），因此统一丢到线程池执行。
+        """
+        return await asyncio.to_thread(self._run_git, args, cwd)
 
     # ------------------------------------------------------------------
     # 快速恢复：直接从文件系统读取 HEAD SHA，无需启动 git 子进程
@@ -139,14 +145,18 @@ class WorktreeManager:
 
             os.makedirs(self.worktree_dir, exist_ok=True)
 
-            result = self._run_git([
-                "worktree", "add",
-                "-B", branch_name, wt_path, base_branch,
-            ])
+            result = await self._run_git_async(
+                [
+                    "worktree",
+                    "add",
+                    "-B",
+                    branch_name,
+                    wt_path,
+                    base_branch,
+                ]
+            )
             if result.returncode != 0:
-                raise WorktreeError(
-                    f"git worktree add failed: {result.stderr.strip()}"
-                )
+                raise WorktreeError(f"git worktree add failed: {result.stderr.strip()}")
 
             perform_post_creation_setup(
                 self.repo_root,
@@ -193,7 +203,6 @@ class WorktreeManager:
     # 退出 worktree
     # ------------------------------------------------------------------
 
-
     async def exit(
         self,
         name: str,
@@ -224,7 +233,7 @@ class WorktreeManager:
     # ------------------------------------------------------------------
 
     async def _remove_worktree(self, name: str, wt: Worktree) -> None:
-        result = self._run_git(["worktree", "remove", "--force", wt.path])
+        result = await self._run_git_async(["worktree", "remove", "--force", wt.path])
         if result.returncode != 0:
             log.warning("git worktree remove failed: %s", result.stderr.strip())
 
@@ -232,14 +241,13 @@ class WorktreeManager:
 
         flat_slug = flatten_slug(name)
         branch_name = f"worktree-{flat_slug}"
-        self._run_git(["branch", "-D", branch_name])
+        await self._run_git_async(["branch", "-D", branch_name])
 
         self.active.pop(name, None)
 
     # ------------------------------------------------------------------
     # 自动清理
     # ------------------------------------------------------------------
-
 
     async def auto_cleanup(self, name: str, head_commit: str) -> CleanupResult:
         wt = self.active.get(name)
@@ -258,7 +266,6 @@ class WorktreeManager:
 
     def list_worktrees(self) -> list[Worktree]:
         return list(self.active.values())
-
 
     def get_current_session(self) -> WorktreeSession | None:
         return self.current_session
@@ -291,7 +298,6 @@ class WorktreeManager:
     # ------------------------------------------------------------------
     # 辅助方法
     # ------------------------------------------------------------------
-
 
     def _get_current_branch(self) -> str:
         try:

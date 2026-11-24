@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -24,7 +23,7 @@ def _parse_include(trimmed: str) -> str:
     """
     # 旧格式兼容：@include <path>
     if trimmed.startswith("@include "):
-        return trimmed[len("@include "):].strip()
+        return trimmed[len("@include ") :].strip()
 
     # 新格式：@./path, @../path, @~/path, @/abs/path
     if not trimmed.startswith("@") or trimmed.startswith("@@"):
@@ -35,7 +34,7 @@ def _parse_include(trimmed: str) -> str:
     # 包含空白字符则不是 include 指令（如 @username 等普通文本）
     if " " in rest or "\t" in rest:
         return ""
-    if rest.startswith("./") or rest.startswith("../") or rest.startswith("~/") or rest.startswith("/"):
+    if rest.startswith(("./", "../", "~/", "/")):
         return rest
     return ""
 
@@ -113,9 +112,7 @@ def process_includes(
                 seen.add(abs_str)
                 result.append(f"<!-- included from {include_path} -->")
                 result.append(
-                    process_includes(
-                        included, resolved.parent, project_root, depth + 1, seen
-                    )
+                    process_includes(included, resolved.parent, project_root, depth + 1, seen)
                 )
                 continue
 
@@ -220,4 +217,3 @@ def load_instructions(project_root: str) -> str:
 
     parts = [f"Contents of {label}:\n\n{content}" for label, content in sources]
     return "\n\n---\n\n".join(parts)
-

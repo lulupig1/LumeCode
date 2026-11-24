@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from lumecode.commands.registry import Command, CommandContext, CommandType
@@ -31,4 +30,3 @@ PLAN_COMMAND = Command(
     type=CommandType.LOCAL_UI,
     handler=handle_plan,
 )
-

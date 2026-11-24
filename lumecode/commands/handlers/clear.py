@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from lumecode.commands.registry import Command, CommandContext, CommandType
@@ -16,6 +15,7 @@ async def handle_clear(ctx: CommandContext) -> None:
         # 用新 session ID 重建 file history
         if ctx.agent:
             from lumecode.filehistory import FileHistory
+
             file_history = FileHistory(ctx.agent._work_dir, new_session.session_id)
             ctx.agent.file_history = file_history
             for tool in ctx.agent.registry.list_tools():
@@ -30,6 +30,8 @@ async def handle_clear(ctx: CommandContext) -> None:
         # 重置 token 计数
         ctx.agent.total_input_tokens = 0
         ctx.agent.total_output_tokens = 0
+        ctx.agent.total_cache_read_tokens = 0
+        ctx.agent.total_cache_creation_tokens = 0
 
     ctx.config["clear_chat"]()
     ctx.ui.refresh_status()
@@ -43,4 +45,3 @@ CLEAR_COMMAND = Command(
     type=CommandType.LOCAL_UI,
     handler=handle_clear,
 )
-

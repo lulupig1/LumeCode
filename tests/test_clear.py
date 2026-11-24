@@ -1,14 +1,13 @@
-﻿
 """验证 /clear 命令正确重置所有会话级状态。"""
+
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import MagicMock
 
 import pytest
 
-from lumecode.commands.registry import CommandContext, UIController
 from lumecode.commands.handlers.clear import handle_clear
+from lumecode.commands.registry import CommandContext
 from lumecode.conversation import ConversationManager
 from lumecode.memory.session import SessionManager
 

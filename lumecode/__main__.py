@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import argparse
@@ -13,6 +12,7 @@ from pathlib import Path
 from lumecode.config import ConfigError, load_config
 from lumecode.hooks import HookConfigError, HookEngine, load_hooks
 from lumecode.permissions import PermissionMode
+from lumecode.telemetry import TelemetryRecorder
 
 
 def main() -> None:
@@ -101,11 +101,14 @@ def main() -> None:
         enable_coordinator_mode=config.enable_coordinator_mode,
         driver_class=NoAltScreenDriver,
         sandbox_config=config.sandbox,
+        memory_config=config.memory,
     )
     app.run()
 
 
-async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_format: str = "text") -> None:
+async def _run_prompt(
+    config, permission_mode, hook_engine, prompt: str, output_format: str = "text"
+) -> None:
     from lumecode.agent import (
         Agent,
         CompactNotification,
@@ -121,7 +124,11 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         TurnComplete,
         UsageEvent,
     )
+    from lumecode.agents.loader import AgentLoader
+    from lumecode.agents.task_manager import TaskManager
+    from lumecode.agents.trace import TraceManager
     from lumecode.client import create_client, resolve_context_window
+    from lumecode.config import WorktreeConfig
     from lumecode.conversation import ConversationManager
     from lumecode.memory.instructions import load_instructions
     from lumecode.permissions import (
@@ -130,18 +137,13 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         PermissionChecker,
         RuleEngine,
     )
+    from lumecode.teams.manager import TeamManager
     from lumecode.tools import create_default_registry
-    from lumecode.agents.loader import AgentLoader
-    from lumecode.agents.task_manager import TaskManager
-    from lumecode.agents.trace import TraceManager
     from lumecode.tools.agent_tool import AgentTool
     from lumecode.tools.impl.tool_search import ToolSearchTool
-    from lumecode.teams.manager import TeamManager
-    from lumecode.teams.models import BackendType
     from lumecode.tools.team_create import TeamCreateTool
     from lumecode.tools.team_delete import TeamDeleteTool
     from lumecode.worktree import WorktreeManager
-    from lumecode.config import WorktreeConfig
 
     is_json = output_format == "stream-json"
 
@@ -172,6 +174,11 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     registry = create_default_registry()
     registry.register(ToolSearchTool(registry, protocol=provider.protocol))
 
+    # -p 模式没有持久化会话，用一次性 trace 文件名；便于评测脚本按次收集。
+    telemetry = TelemetryRecorder(
+        f"exec-{time.time_ns()}",
+        base_dir=str(Path(work_dir) / ".lumecode" / "traces"),
+    )
     agent = Agent(
         client=client,
         registry=registry,
@@ -181,6 +188,7 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         context_window=provider.get_context_window(),
         instructions_content=instructions,
         hook_engine=hook_engine,
+        telemetry=telemetry,
     )
 
     wt_cfg = config.worktree or WorktreeConfig()
@@ -205,13 +213,15 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         team_manager=team_manager,
     )
     registry.register(agent_tool)
-    registry.register(TeamCreateTool(
-        team_manager=team_manager,
-        parent_agent=agent,
-        teammate_mode="in-process",
-        is_interactive=False,
-        enable_coordinator_mode=config.enable_coordinator_mode,
-    ))
+    registry.register(
+        TeamCreateTool(
+            team_manager=team_manager,
+            parent_agent=agent,
+            teammate_mode="in-process",
+            is_interactive=False,
+            enable_coordinator_mode=config.enable_coordinator_mode,
+        )
+    )
     registry.register(TeamDeleteTool(team_manager=team_manager, parent_agent=agent))
 
     def drain_notifications() -> list[str]:
@@ -238,6 +248,8 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     text_buf = ""
     total_input = 0
     total_output = 0
+    total_cache_read = 0
+    total_cache_creation = 0
     tool_calls: list[dict] = []
 
     async for event in agent.run(conv):
@@ -253,36 +265,46 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         elif isinstance(event, ToolUseEvent):
             tool_calls.append({"name": event.tool_name, "is_error": False})
             if is_json:
-                emit_json({
-                    "type": "tool_use",
-                    "tool_name": event.tool_name,
-                    "tool_id": event.tool_id,
-                    "args": event.arguments,
-                })
+                emit_json(
+                    {
+                        "type": "tool_use",
+                        "tool_name": event.tool_name,
+                        "tool_id": event.tool_id,
+                        "args": event.arguments,
+                    }
+                )
 
         elif isinstance(event, ToolResultEvent):
             # 回填最后一个同名 tool_call 的 is_error
             if tool_calls:
                 tool_calls[-1]["is_error"] = event.is_error
             if is_json:
-                emit_json({
-                    "type": "tool_result",
-                    "tool_name": event.tool_name,
-                    "tool_id": event.tool_id,
-                    "output": event.output,
-                    "is_error": event.is_error,
-                    "elapsed": round(event.elapsed, 3),
-                })
+                emit_json(
+                    {
+                        "type": "tool_result",
+                        "tool_name": event.tool_name,
+                        "tool_id": event.tool_id,
+                        "output": event.output,
+                        "is_error": event.is_error,
+                        "elapsed": round(event.elapsed, 3),
+                    }
+                )
 
         elif isinstance(event, UsageEvent):
             total_input = event.input_tokens
             total_output = event.output_tokens
+            total_cache_read = event.cache_read_tokens
+            total_cache_creation = event.cache_creation_tokens
             if is_json:
-                emit_json({
-                    "type": "usage",
-                    "input_tokens": event.input_tokens,
-                    "output_tokens": event.output_tokens,
-                })
+                emit_json(
+                    {
+                        "type": "usage",
+                        "input_tokens": event.input_tokens,
+                        "output_tokens": event.output_tokens,
+                        "cache_read_tokens": event.cache_read_tokens,
+                        "cache_creation_tokens": event.cache_creation_tokens,
+                    }
+                )
 
         elif isinstance(event, TurnComplete):
             if is_json:
@@ -292,18 +314,22 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
             # 最终结果：stream-json 输出 result 行，text 模式直接打印文本
             elapsed_ms = int((time.monotonic() - start) * 1000)
             if is_json:
-                emit_json({
-                    "type": "result",
-                    "result": text_buf,
-                    "duration_ms": elapsed_ms,
-                    "num_turns": event.total_turns,
-                    "tool_calls": tool_calls,
-                    "usage": {
-                        "input_tokens": total_input,
-                        "output_tokens": total_output,
-                    },
-                    "stop_reason": "end_turn",
-                })
+                emit_json(
+                    {
+                        "type": "result",
+                        "result": text_buf,
+                        "duration_ms": elapsed_ms,
+                        "num_turns": event.total_turns,
+                        "tool_calls": tool_calls,
+                        "usage": {
+                            "input_tokens": total_input,
+                            "output_tokens": total_output,
+                            "cache_read_tokens": total_cache_read,
+                            "cache_creation_tokens": total_cache_creation,
+                        },
+                        "stop_reason": "end_turn",
+                    }
+                )
             else:
                 print(text_buf, end="", flush=True)
             break
@@ -328,13 +354,18 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
 
     # 如果有 team 在运行，轮询等待 teammate 完成
     if not team_manager._teams:
+        telemetry.close()
         return
 
     for i in range(90):
         await asyncio.sleep(2)
         running = {k: not t.done() for k, t in task_manager._async_tasks.items()}
         completed_ids = [t.id for t in task_manager._tasks.values() if t.status != "running"]
-        print(f"[poll {i}] running={running} completed={completed_ids} teams={list(team_manager._teams.keys())} queue_size={task_manager._notify_queue.qsize()}", file=sys.stderr, flush=True)
+        print(
+            f"[poll {i}] running={running} completed={completed_ids} teams={list(team_manager._teams.keys())} queue_size={task_manager._notify_queue.qsize()}",
+            file=sys.stderr,
+            flush=True,
+        )
         notes = drain_notifications()
         if not notes:
             has_running = any(v for v in running.values())
@@ -353,7 +384,8 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         else:
             print(last_result, flush=True)
 
+    telemetry.close()
+
 
 if __name__ == "__main__":
     main()
-

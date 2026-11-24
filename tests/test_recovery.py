@@ -1,23 +1,19 @@
-﻿
 from __future__ import annotations
 
-import time
-
-import pytest
-
 from lumecode.context.manager import (
+    _RECOVERY_CHARS_PER_TOKEN,
     RECOVERY_FILE_LIMIT,
-    RECOVERY_SKILLS_BUDGET,
     RECOVERY_TOKENS_PER_FILE,
     RECOVERY_TOKENS_PER_SKILL,
     RecoveryState,
-    _RECOVERY_CHARS_PER_TOKEN,
     build_recovery_attachment,
 )
+
 
 def test_recovery_attachment_empty_when_nothing_recorded():
     assert build_recovery_attachment(None, None) == ""
     assert build_recovery_attachment(RecoveryState(), None) == ""
+
 
 def test_recovery_attachment_emits_all_sections():
     state = RecoveryState()
@@ -34,6 +30,7 @@ def test_recovery_attachment_emits_all_sections():
     assert "- Bash" in out
     assert "提示" in out  # 结尾提示部分的标题
 
+
 def test_recovery_file_limit_and_order():
     state = RecoveryState()
     # 记录 7 个时间分散的文件；只有最新的 5 个应当出现。
@@ -48,12 +45,14 @@ def test_recovery_file_limit_and_order():
     assert files[0].path == "/f6"  # 最新的排在最前
     assert files[-1].path == "/f2"
 
+
 def test_recovery_truncates_per_file():
     huge = "x" * int(RECOVERY_TOKENS_PER_FILE * _RECOVERY_CHARS_PER_TOKEN * 3)
     state = RecoveryState()
     state.record_file_read("/big", huge)
     out = build_recovery_attachment(state, None)
     assert "内容已截断" in out
+
 
 def test_recovery_skills_budget():
     state = RecoveryState()

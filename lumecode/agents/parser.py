@@ -79,22 +79,17 @@ def _validate_agent_meta(meta: dict, source: str = "") -> None:
     pm = str(meta.get("permissionMode", "default"))
     if pm not in VALID_PERMISSION_MODES:
         raise AgentParseError(
-            f"Invalid permissionMode '{pm}'{ctx}: "
-            f"must be one of {VALID_PERMISSION_MODES - {''}}"
+            f"Invalid permissionMode '{pm}'{ctx}: must be one of {VALID_PERMISSION_MODES - {''}}"
         )
 
     max_turns = meta.get("maxTurns")
-    if max_turns is not None:
-        if not isinstance(max_turns, int) or max_turns <= 0:
-            raise AgentParseError(
-                f"Invalid maxTurns '{max_turns}'{ctx}: must be a positive integer"
-            )
+    if max_turns is not None and (not isinstance(max_turns, int) or max_turns <= 0):
+        raise AgentParseError(f"Invalid maxTurns '{max_turns}'{ctx}: must be a positive integer")
 
     isolation = str(meta.get("isolation", ""))
     if isolation not in VALID_ISOLATION_MODES:
         raise AgentParseError(
-            f"Invalid isolation '{isolation}'{ctx}: "
-            f"must be one of {VALID_ISOLATION_MODES - {''}}"
+            f"Invalid isolation '{isolation}'{ctx}: must be one of {VALID_ISOLATION_MODES - {''}}"
         )
 
 

@@ -1,4 +1,3 @@
-
 """macOS Seatbelt 沙箱实现。
 
 通过 sandbox-exec -p <profile> 执行命令，利用 macOS 内核的 Seatbelt

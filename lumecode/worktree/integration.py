@@ -1,11 +1,10 @@
-
 from __future__ import annotations
 
 import secrets
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from lumecode.worktree.manager import WorktreeManager
+    pass
 
 
 WORKTREE_NOTICE_TEMPLATE = """\
@@ -36,4 +35,3 @@ def build_worktree_notice(parent_cwd: str, wt_path: str) -> str:
         parent_cwd=parent_cwd,
         wt_path=wt_path,
     )
-

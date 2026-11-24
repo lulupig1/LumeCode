@@ -25,7 +25,6 @@ class MCPClient:
         # 存储 MCP 服务器的 InitializeResult，用于提取 instructions 等元信息
         self._init_result: types.InitializeResult | None = None
 
-
     @property
     def is_alive(self) -> bool:
         return self._alive
@@ -36,7 +35,6 @@ class MCPClient:
         if self._init_result is not None and self._init_result.instructions:
             return self._init_result.instructions
         return ""
-
 
     async def connect(self) -> None:
         if self._alive:
@@ -51,9 +49,7 @@ class MCPClient:
             else:
                 read, write = await self._connect_http()
 
-            session = await self._stack.enter_async_context(
-                ClientSession(read, write)
-            )
+            session = await self._stack.enter_async_context(ClientSession(read, write))
             # 保存 InitializeResult，后续可从中提取 instructions
             self._init_result = await session.initialize()
             self._session = session
@@ -62,7 +58,6 @@ class MCPClient:
         except Exception:
             await self._cleanup_stack()
             raise
-
 
     async def _connect_stdio(self) -> tuple[Any, Any]:
         assert self._stack is not None
@@ -73,20 +68,17 @@ class MCPClient:
             args=self.config.args,
             env=build_child_env(self.config.env),
         )
-        devnull = open(os.devnull, "w")
+        # 句柄由 self._stack 的回调负责关闭，不能改成 with（生命周期跨函数）
+        devnull = open(os.devnull, "w")  # noqa: SIM115, ASYNC230
         self._stack.callback(devnull.close)
-        read, write = await self._stack.enter_async_context(
-            stdio_client(params, errlog=devnull)
-        )
+        read, write = await self._stack.enter_async_context(stdio_client(params, errlog=devnull))
         return read, write
 
     async def _connect_http(self) -> tuple[Any, Any]:
         assert self._stack is not None
         assert self.config.url is not None
 
-        resolved_headers = {
-            k: resolve_env_vars(v) for k, v in self.config.headers.items()
-        }
+        resolved_headers = {k: resolve_env_vars(v) for k, v in self.config.headers.items()}
         http_client = httpx.AsyncClient(
             headers=resolved_headers,
             follow_redirects=True,
@@ -99,16 +91,12 @@ class MCPClient:
         read, write = result[0], result[1]
         return read, write
 
-
     async def list_tools(self) -> list[types.Tool]:
         assert self._session is not None
         result = await self._session.list_tools()
         return list(result.tools)
 
-
-    async def call_tool(
-        self, name: str, arguments: dict[str, Any]
-    ) -> types.CallToolResult:
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
         assert self._session is not None
         return await self._session.call_tool(name, arguments)
 

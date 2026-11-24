@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from lumecode.commands.registry import Command, CommandContext, CommandType
@@ -16,9 +15,10 @@ async def handle_mcp(ctx: CommandContext) -> None:
 
     mcp_mgr = getattr(app, "mcp_manager", None)
     if mcp_mgr and hasattr(mcp_mgr, "_clients"):
-        for name, client in mcp_mgr._clients.items():
+        for name in mcp_mgr._clients:
             tool_names = [
-                t.name for t in ctx.agent.registry.list_tools()
+                t.name
+                for t in ctx.agent.registry.list_tools()
                 if t.name.startswith(f"mcp__{name}__")
             ]
             lines.append(f"\n  {name}: {len(tool_names)} tools")

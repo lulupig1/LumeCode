@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 from lumecode.teams.progress import TeammateProgress
 
@@ -25,7 +24,7 @@ class TeammateInfo:
     worktree_path: str
     backend_type: str  # BackendType value
     is_active: bool | None = None
-    progress: Optional[TeammateProgress] = None
+    progress: TeammateProgress | None = None
 
     def to_dict(self) -> dict:
         # Exclude progress (runtime-only, contains threading.Lock)
@@ -64,7 +63,6 @@ class AgentTeam:
                 return m
         return None
 
-
     def add_member(self, member: TeammateInfo) -> None:
         self.members.append(member)
 
@@ -75,7 +73,6 @@ class AgentTeam:
                 return True
         return False
 
-
     def set_member_active(self, name: str, is_active: bool | None) -> bool:
         member = self.get_member(name)
         if member is None:
@@ -85,7 +82,6 @@ class AgentTeam:
 
     def all_idle(self) -> bool:
         return all(m.is_active is False for m in self.members)
-
 
     def active_members(self) -> list[TeammateInfo]:
         return [m for m in self.members if m.is_active is not False]
@@ -98,7 +94,6 @@ class AgentTeam:
             "config_path": self.config_path,
             "description": self.description,
         }
-
 
     @classmethod
     def from_dict(cls, data: dict) -> AgentTeam:

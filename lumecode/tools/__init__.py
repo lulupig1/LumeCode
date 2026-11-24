@@ -20,13 +20,11 @@ class ToolRegistry:
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
-
     def is_enabled(self, name: str) -> bool:
         return name in self._tools and name not in self._disabled
 
     def enable(self, name: str) -> None:
         self._disabled.discard(name)
-
 
     def disable(self, name: str) -> None:
         if name in self._tools:
@@ -35,13 +33,11 @@ class ToolRegistry:
     def enable_all(self) -> None:
         self._disabled.clear()
 
-
     def mark_discovered(self, name: str) -> None:
         self._discovered.add(name)
 
     def is_discovered(self, name: str) -> bool:
         return name in self._discovered
-
 
     def get_deferred_tool_names(self) -> list[str]:
         return [
@@ -81,12 +77,14 @@ class ToolRegistry:
         for _, _name, tool in scored[:max_results]:
             base = tool.get_schema()
             if protocol in ("openai", "openai-compat"):
-                results.append({
-                    "type": "function",
-                    "name": base["name"],
-                    "description": base["description"],
-                    "parameters": base["input_schema"],
-                })
+                results.append(
+                    {
+                        "type": "function",
+                        "name": base["name"],
+                        "description": base["description"],
+                        "parameters": base["input_schema"],
+                    }
+                )
             else:
                 results.append(base)
         return results
@@ -103,19 +101,20 @@ class ToolRegistry:
                 continue
             base = tool.get_schema()
             if protocol in ("openai", "openai-compat"):
-                results.append({
-                    "type": "function",
-                    "name": base["name"],
-                    "description": base["description"],
-                    "parameters": base["input_schema"],
-                })
+                results.append(
+                    {
+                        "type": "function",
+                        "name": base["name"],
+                        "description": base["description"],
+                        "parameters": base["input_schema"],
+                    }
+                )
             else:
                 results.append(base)
         return results
 
     def list_tools(self) -> list[Tool]:
         return list(self._tools.values())
-
 
     def get_all_schemas(self, protocol: str = "anthropic") -> list[dict[str, Any]]:
         schemas: list[dict[str, Any]] = []
@@ -126,18 +125,22 @@ class ToolRegistry:
                 continue
             base = tool.get_schema()
             if protocol in ("openai", "openai-compat"):
-                schemas.append({
-                    "type": "function",
-                    "name": base["name"],
-                    "description": base["description"],
-                    "parameters": base["input_schema"],
-                })
+                schemas.append(
+                    {
+                        "type": "function",
+                        "name": base["name"],
+                        "description": base["description"],
+                        "parameters": base["input_schema"],
+                    }
+                )
             else:
                 schemas.append(base)
         return schemas
 
 
-def create_default_registry(file_cache: FileCache | None = None, file_history: Any = None) -> ToolRegistry:
+def create_default_registry(
+    file_cache: FileCache | None = None, file_history: Any = None
+) -> ToolRegistry:
     from lumecode.tools.bash import Bash
     from lumecode.tools.edit_file import EditFile
     from lumecode.tools.file_state_cache import FileStateCache
@@ -150,8 +153,16 @@ def create_default_registry(file_cache: FileCache | None = None, file_history: A
 
     registry = ToolRegistry()
     registry.register(ReadFile(file_cache=file_cache, file_state_cache=file_state_cache))
-    registry.register(WriteFile(file_cache=file_cache, file_history=file_history, file_state_cache=file_state_cache))
-    registry.register(EditFile(file_cache=file_cache, file_history=file_history, file_state_cache=file_state_cache))
+    registry.register(
+        WriteFile(
+            file_cache=file_cache, file_history=file_history, file_state_cache=file_state_cache
+        )
+    )
+    registry.register(
+        EditFile(
+            file_cache=file_cache, file_history=file_history, file_state_cache=file_state_cache
+        )
+    )
     registry.register(Bash())
     registry.register(Glob())
     registry.register(Grep())

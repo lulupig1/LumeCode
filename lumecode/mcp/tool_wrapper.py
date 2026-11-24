@@ -9,9 +9,7 @@ from lumecode.mcp.client import MCPClient
 from lumecode.tools.base import Tool, ToolResult
 
 
-def _build_params_model(
-    tool_name: str, input_schema: dict[str, Any]
-) -> type[BaseModel]:
+def _build_params_model(tool_name: str, input_schema: dict[str, Any]) -> type[BaseModel]:
     properties = input_schema.get("properties", {})
     required = set(input_schema.get("required", []))
 
@@ -64,19 +62,18 @@ class MCPToolWrapper(Tool):
         self._server_name = server_name
         self._tool_def = tool_def
         self._client = client
-        self.name = f"mcp_{server_name}_{tool_def.name}"
+        # 双下划线分隔：tool_filter / /mcp 命令 / MCP instructions 都以
+        # "mcp__{server}__" 作为前缀来识别 MCP 工具，三者必须保持一致。
+        self.name = f"mcp__{server_name}__{tool_def.name}"
         self.description = tool_def.description or tool_def.name
         self.category = "command"
         self.is_concurrency_safe = False
         self.should_defer = True
-        self.params_model = _build_params_model(
-            tool_def.name, tool_def.inputSchema
-        )
+        self.params_model = _build_params_model(tool_def.name, tool_def.inputSchema)
 
     @property
     def mcp_tool_name(self) -> str:
         return self._tool_def.name
-
 
     def get_schema(self) -> dict[str, Any]:
         return {
@@ -84,7 +81,6 @@ class MCPToolWrapper(Tool):
             "description": self.description,
             "input_schema": self._tool_def.inputSchema,
         }
-
 
     async def execute(self, params: BaseModel) -> ToolResult:
         if not self._client.is_alive:

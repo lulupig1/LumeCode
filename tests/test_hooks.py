@@ -1,16 +1,14 @@
-﻿
 """Hook 系统的测试 —— 涵盖事件、条件、执行器、引擎、加载器以及与 agent 的集成。"""
+
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator
 from unittest.mock import patch
 
 import pytest
 
 from lumecode.hooks import (
     Action,
-    ActionResult,
     Condition,
     ConditionGroup,
     ConditionParseError,
@@ -28,6 +26,7 @@ from lumecode.hooks import (
 # LifecycleEvent
 # ---------------------------------------------------------------------------
 
+
 class TestLifecycleEvent:
     def test_has_15_events(self):
         assert len(LifecycleEvent) == 15
@@ -39,21 +38,31 @@ class TestLifecycleEvent:
 
     def test_all_values(self):
         expected = {
-            "session_start", "session_end",
-            "turn_start", "turn_end",
-            "pre_tool_use", "post_tool_use",
-            "pre_send", "post_receive",
-            "startup", "shutdown", "error", "compact",
-            "permission_request", "file_change", "command_execute",
+            "session_start",
+            "session_end",
+            "turn_start",
+            "turn_end",
+            "pre_tool_use",
+            "post_tool_use",
+            "pre_send",
+            "post_receive",
+            "startup",
+            "shutdown",
+            "error",
+            "compact",
+            "permission_request",
+            "file_change",
+            "command_execute",
         }
         assert {e.value for e in LifecycleEvent} == expected
+
 
 # ---------------------------------------------------------------------------
 # HookContext
 # ---------------------------------------------------------------------------
 
-class TestHookContext:
 
+class TestHookContext:
     def test_get_field_tool(self):
         ctx = HookContext(tool_name="Bash")
         assert ctx.get_field("tool") == "Bash"
@@ -95,9 +104,11 @@ class TestHookContext:
         assert ctx.expand("hello $UNKNOWN world") == "hello $UNKNOWN world"
         assert ctx.expand("$FILE_PATH") == ""
 
+
 # ---------------------------------------------------------------------------
 # 条件解析
 # ---------------------------------------------------------------------------
+
 
 class TestParseCondition:
     def test_single_condition(self):
@@ -130,7 +141,7 @@ class TestParseCondition:
         assert parse_condition("   ") is None
 
     def test_regex_format(self):
-        group = parse_condition('args.command =~ /rm\\s+-rf/')
+        group = parse_condition("args.command =~ /rm\\s+-rf/")
         assert group is not None
         c = group.conditions[0]
         assert c.operator == "=~"
@@ -140,9 +151,11 @@ class TestParseCondition:
         with pytest.raises(ConditionParseError, match="No valid operator"):
             parse_condition("tool Bash")
 
+
 # ---------------------------------------------------------------------------
 # 条件求值
 # ---------------------------------------------------------------------------
+
 
 class TestConditionEvaluate:
     def test_eq(self):
@@ -170,6 +183,7 @@ class TestConditionEvaluate:
         assert c.evaluate(ctx) is True
         c2 = Condition(field="args.path", operator="~=", value="*.go")
         assert c2.evaluate(ctx) is False
+
 
 class TestConditionGroupEvaluate:
     def test_and_all_pass(self):
@@ -221,9 +235,11 @@ class TestConditionGroupEvaluate:
         group = ConditionGroup(conditions=[], logic="and")
         assert group.evaluate(ctx) is True
 
+
 # ---------------------------------------------------------------------------
 # Executors
 # ---------------------------------------------------------------------------
+
 
 class TestCommandExecutor:
     @pytest.mark.asyncio
@@ -255,6 +271,7 @@ class TestCommandExecutor:
         assert result.success is False
         assert "timed out" in result.output
 
+
 class TestPromptExecutor:
     @pytest.mark.asyncio
     async def test_returns_message(self):
@@ -265,6 +282,7 @@ class TestPromptExecutor:
         result = await execute_prompt(action, ctx)
         assert result.success is True
         assert result.output == "Hello WriteFile"
+
 
 class TestHttpExecutor:
     @pytest.mark.asyncio
@@ -282,6 +300,7 @@ class TestHttpExecutor:
             assert result.success is True
             assert "200" in result.output
 
+
 class TestAgentExecutor:
     @pytest.mark.asyncio
     async def test_stub(self):
@@ -292,6 +311,7 @@ class TestAgentExecutor:
         result = await execute_agent(action, ctx)
         assert result.success is True
         assert "not yet implemented" in result.output
+
 
 class TestExecuteAction:
     @pytest.mark.asyncio
@@ -312,9 +332,11 @@ class TestExecuteAction:
         result = await execute_action(action, ctx)
         assert result.success is False
 
+
 # ---------------------------------------------------------------------------
 # Loader
 # ---------------------------------------------------------------------------
+
 
 class TestLoadHooks:
     def test_full_config(self):
@@ -333,9 +355,7 @@ class TestLoadHooks:
         assert hooks[0].condition is not None
 
     def test_auto_id(self):
-        raw = [
-            {"event": "session_start", "action": {"type": "prompt", "message": "hello"}}
-        ]
+        raw = [{"event": "session_start", "action": {"type": "prompt", "message": "hello"}}]
         hooks = load_hooks(raw)
         assert hooks[0].id == "session_start_0"
 
@@ -352,40 +372,49 @@ class TestLoadHooks:
             load_hooks([{"event": "startup", "action": {"type": "bad"}}])
 
     def test_reject_on_non_pre_tool_use(self):
-        with pytest.raises(HookConfigError, match="reject.*pre_tool_use"):
-            load_hooks([{
-                "event": "post_tool_use",
-                "action": {"type": "command", "command": "x"},
-                "reject": True,
-            }])
+        with pytest.raises(HookConfigError, match=r"reject.*pre_tool_use"):
+            load_hooks(
+                [
+                    {
+                        "event": "post_tool_use",
+                        "action": {"type": "command", "command": "x"},
+                        "reject": True,
+                    }
+                ]
+            )
 
     def test_async_on_pre_tool_use(self):
-        with pytest.raises(HookConfigError, match="async.*pre_tool_use"):
-            load_hooks([{
-                "event": "pre_tool_use",
-                "action": {"type": "command", "command": "x"},
-                "async": True,
-            }])
+        with pytest.raises(HookConfigError, match=r"async.*pre_tool_use"):
+            load_hooks(
+                [
+                    {
+                        "event": "pre_tool_use",
+                        "action": {"type": "command", "command": "x"},
+                        "async": True,
+                    }
+                ]
+            )
 
     def test_missing_required_field(self):
-        with pytest.raises(HookConfigError, match="requires.*command"):
+        with pytest.raises(HookConfigError, match=r"requires.*command"):
             load_hooks([{"event": "startup", "action": {"type": "command"}}])
 
-        with pytest.raises(HookConfigError, match="requires.*url"):
+        with pytest.raises(HookConfigError, match=r"requires.*url"):
             load_hooks([{"event": "startup", "action": {"type": "http"}}])
 
-        with pytest.raises(HookConfigError, match="requires.*message"):
+        with pytest.raises(HookConfigError, match=r"requires.*message"):
             load_hooks([{"event": "startup", "action": {"type": "prompt"}}])
 
-        with pytest.raises(HookConfigError, match="requires.*prompt"):
+        with pytest.raises(HookConfigError, match=r"requires.*prompt"):
             load_hooks([{"event": "startup", "action": {"type": "agent"}}])
+
 
 # ---------------------------------------------------------------------------
 # HookEngine
 # ---------------------------------------------------------------------------
 
-class TestHookEngine:
 
+class TestHookEngine:
     def _make_hook(self, **kwargs) -> Hook:
         defaults = {
             "id": "test",
@@ -499,9 +528,11 @@ class TestHookEngine:
         # 给异步任务一点时间完成
         await asyncio.sleep(0.1)
 
+
 # ---------------------------------------------------------------------------
 # Agent 循环集成
 # ---------------------------------------------------------------------------
+
 
 class TestAgentHookIntegration:
     """验证 pre_tool_use 拒绝会导致工具调用被跳过。"""
@@ -512,7 +543,7 @@ class TestAgentHookIntegration:
         from lumecode.client import LLMClient
         from lumecode.conversation import ConversationManager
         from lumecode.tools import create_default_registry
-        from lumecode.tools.base import StreamEnd, StreamEvent, TextDelta, ToolCallComplete
+        from lumecode.tools.base import StreamEnd, TextDelta, ToolCallComplete
 
         class MockClient(LLMClient):
             def __init__(self):

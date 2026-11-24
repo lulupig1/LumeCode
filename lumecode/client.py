@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
+import logging
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
@@ -26,6 +27,7 @@ from lumecode.tools.base import (
     ToolCallStart,
 )
 
+log = logging.getLogger(__name__)
 
 # 限制自动拉取模型元数据的超时时间，防止慢响应或挂起的
 # /v1/models 端点拖延启动。超时后降级为 None（即"未知"），
@@ -52,11 +54,13 @@ def _mark_last_user_tail_for_cache(messages: list[dict[str, Any]]) -> None:
         content = msg.get("content")
         if isinstance(content, str):
             # 把字符串 content 升级为 block 形式，以便附加 cache_control。
-            msg["content"] = [{
-                "type": "text",
-                "text": content,
-                "cache_control": _EPHEMERAL,
-            }]
+            msg["content"] = [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": _EPHEMERAL,
+                }
+            ]
         elif isinstance(content, list) and content:
             last = content[-1]
             if isinstance(last, dict):
@@ -89,8 +93,6 @@ class AuthenticationError(LLMError):
 
 
 class RateLimitError(LLMError):
-
-
     def __init__(self, message: str, retry_after: float | None = None):
         super().__init__(message)
         self.retry_after = retry_after
@@ -110,14 +112,18 @@ class LLMClient(ABC):
     ) -> AsyncIterator[StreamEvent]:
         yield TextDelta("")
 
-    def set_max_output_tokens(self, tokens: int) -> None:
-        pass
+    def set_max_output_tokens(self, tokens: int) -> None:  # noqa: B027
+        """可选覆写点：提高单次响应的输出上限（max_tokens 恢复流程使用）。
+
+        刻意不标 @abstractmethod：它只是给需要的实现方覆写，
+        不是所有 LLMClient 都必须提供的契约。
+        """
 
 
 def _supports_adaptive_thinking(model: str) -> bool:
     for family in ("claude-opus-4-", "claude-sonnet-4-"):
         if model.startswith(family):
-            rest = model[len(family):]
+            rest = model[len(family) :]
             if rest and rest[0].isdigit() and int(rest[0]) >= 6:
                 return True
     return False
@@ -156,7 +162,8 @@ class AnthropicClient(LLMClient):
             if isinstance(window, int) and window > 0:
                 return window
             return None
-        except Exception:
+        except Exception as e:
+            log.debug("fetch_model_context_window failed: %s", e)
             return None
 
     async def stream(
@@ -181,11 +188,13 @@ class AnthropicClient(LLMClient):
             "messages": messages,
         }
         if system:
-            kwargs["system"] = [{
-                "type": "text",
-                "text": system,
-                "cache_control": {"type": "ephemeral"},
-            }]
+            kwargs["system"] = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
         if tools:
             kwargs["tools"] = _mark_last_tool_for_cache(tools)
 
@@ -284,9 +293,7 @@ class AnthropicClient(LLMClient):
                 usage = final.usage
                 input_tokens = usage.input_tokens
                 cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
-                cache_creation = getattr(
-                    usage, "cache_creation_input_tokens", 0
-                ) or 0
+                cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
 
                 # 当 message_start 报告 input_tokens=0 时（MiniMax 等兼容
                 # provider 的行为），降级使用 message_delta 中捕获的值。
@@ -444,6 +451,38 @@ class OpenAIClient(LLMClient):
             raise LLMError(f"API error ({e.status_code}): {e.message}") from e
 
 
+def _openai_usage_counts(usage: Any) -> tuple[int, int, int]:
+    """把 OpenAI 兼容的 usage 解析成 ``(input_tokens, cache_read, output_tokens)``。
+
+    ``prompt_tokens`` 包含命中缓存的 token，所以 input 要减掉 cache_read，
+    保持 ``input + cache_read`` 可加性（与 Anthropic 对齐）。
+
+    缓存命中字段各 provider 不一致：
+    - OpenAI: ``prompt_tokens_details.cached_tokens``
+    - DeepSeek: ``prompt_cache_hit_tokens``（部分版本也会填 ``cached_tokens``）
+
+    两个都读，取先命中的那个；读不到就认为没有缓存命中，而不是报错。
+    """
+    prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+    output_tokens = getattr(usage, "completion_tokens", 0) or 0
+    details = getattr(usage, "prompt_tokens_details", None)
+    cache_read = (getattr(details, "cached_tokens", 0) or 0) if details is not None else 0
+    if not cache_read:
+        cache_read = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
+    # 防御异常 provider：缓存数不应超过 prompt 总数。
+    cache_read = min(cache_read, prompt_tokens)
+    return max(prompt_tokens - cache_read, 0), cache_read, output_tokens
+
+
+def _map_finish_reason(finish_reason: str | None) -> str:
+    """把 Chat Completions 的 finish_reason 映射成内部 stop_reason。"""
+    if finish_reason == "length":
+        return "max_tokens"
+    if finish_reason == "content_filter":
+        return "content_filter"
+    return "end_turn"
+
+
 class OpenAICompatClient(LLMClient):
     """面向 OpenAI 兼容 provider 的客户端，使用 Chat Completions API。
 
@@ -454,11 +493,20 @@ class OpenAICompatClient(LLMClient):
     """
 
     # 已知不支持 stream_options 的 provider（base_url 子串匹配）。
-    # DeepSeek、Ollama、vLLM 等兼容 provider 在收到 stream_options
-    # 参数时会返回 400 错误。
+    # 收到该参数时会返回 400，因此只对确认支持的 provider 发送；
+    # 要收窄这个列表，先确认 provider 的流式接口接受 stream_options。
+    # 注意：即使不发送，部分 provider（如 DeepSeek）仍会在最后一个内容
+    # chunk 上附带 usage，解析逻辑对此做了兼容。
     _NO_STREAM_OPTIONS_PROVIDERS = (
-        "deepseek", "ollama", "vllm", "together", "groq",
-        "openrouter", "mistral", "fireworks", "perplexity",
+        "deepseek",
+        "ollama",
+        "vllm",
+        "together",
+        "groq",
+        "openrouter",
+        "mistral",
+        "fireworks",
+        "perplexity",
     )
 
     def __init__(self, config: ProviderConfig) -> None:
@@ -497,14 +545,16 @@ class OpenAICompatClient(LLMClient):
         """
         converted: list[dict[str, Any]] = []
         for t in tools:
-            converted.append({
-                "type": "function",
-                "function": {
-                    "name": t["name"],
-                    "description": t.get("description", ""),
-                    "parameters": t.get("parameters", t.get("input_schema", {})),
-                },
-            })
+            converted.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t["name"],
+                        "description": t.get("description", ""),
+                        "parameters": t.get("parameters", t.get("input_schema", {})),
+                    },
+                }
+            )
         return converted
 
     async def stream(
@@ -519,7 +569,7 @@ class OpenAICompatClient(LLMClient):
 
         # 如果有 system 消息则插入到消息列表头部。
         if system:
-            messages = [{"role": "system", "content": system}] + messages
+            messages = [{"role": "system", "content": system}, *messages]
 
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -527,7 +577,9 @@ class OpenAICompatClient(LLMClient):
             "max_tokens": self.max_output_tokens,
             "stream": True,
         }
-        # DeepSeek、Ollama 等兼容 provider 不支持 stream_options 参数
+        # 只对确认支持 stream_options 的 provider 发送；不支持的会在
+        # _NO_STREAM_OPTIONS_PROVIDERS 中被排除。无论是否发送，只要流里
+        # 出现了 usage（OpenAI 的独立 chunk 或 DeepSeek 的末内容 chunk）都会解析。
         if self._send_stream_options:
             kwargs["stream_options"] = {"include_usage": True}
         if tools:
@@ -537,27 +589,21 @@ class OpenAICompatClient(LLMClient):
         # tool_calls 列表中的位置索引下发 delta，我们按索引跟踪每个进行中的调用。
         active_calls: dict[int, dict[str, str]] = {}  # 索引 -> {id, name, args}
         reasoning_accum = ""
-        stream_end_sent = False
+        pending_usage: Any = None
+        finish_reason = ""
 
         try:
             response = await self._client.chat.completions.create(**kwargs)
             async for chunk in response:
+                # usage 可能挂在两种位置，必须都处理：
+                # 1. OpenAI 风格：choices 为空的独立 usage chunk；
+                # 2. DeepSeek 风格：usage 挂在最后一个内容 chunk 上（choices 非空）。
+                #    如果只在 choices 为空时读取，DeepSeek 的 usage 会永远丢失。
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage is not None:
+                    pending_usage = chunk_usage
+
                 if not chunk.choices:
-                    # 最后一个 chunk，只包含 usage 数据（仅当 stream_options 启用时）。
-                    if chunk.usage:
-                        details = getattr(
-                            chunk.usage, "prompt_tokens_details", None
-                        )
-                        cache_read = getattr(details, "cached_tokens", 0) or 0
-                        prompt_tokens = chunk.usage.prompt_tokens or 0
-                        yield StreamEnd(
-                            stop_reason="end_turn",
-                            input_tokens=max(prompt_tokens - cache_read, 0),
-                            output_tokens=chunk.usage.completion_tokens or 0,
-                            cache_read=cache_read,
-                            cache_creation=0,
-                        )
-                        stream_end_sent = True
                     continue
 
                 choice = chunk.choices[0]
@@ -595,7 +641,11 @@ class OpenAICompatClient(LLMClient):
                             yield ToolCallDelta(text=tc.function.arguments)
 
                 # --- 结束原因 ---
-                if choice.finish_reason in ("tool_calls", "stop"):
+                # "length" 也要捕获：否则 max_tokens 会被误报成正常结束，
+                # Agent 的截断续写逻辑（stop_reason == "max_tokens"）永远不触发。
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+                if choice.finish_reason in ("tool_calls", "stop", "length"):
                     if reasoning_accum:
                         yield ThinkingComplete(thinking=reasoning_accum, signature="")
                         reasoning_accum = ""
@@ -612,10 +662,21 @@ class OpenAICompatClient(LLMClient):
                             )
                         active_calls.clear()
 
-            # 如果 provider 不支持 stream_options，就不会收到 usage chunk；
-            # 在流结束后发送一个零值的 StreamEnd，确保上层不挂起。
-            if not stream_end_sent:
-                yield StreamEnd(stop_reason="end_turn")
+            # 流结束后统一发 StreamEnd：
+            # - 有 usage（标准 chunk 或最后一个内容 chunk 携带）就用真实值；
+            # - 没有 usage（部分兼容 provider 需要额外参数或直接不返回）
+            #   就用零值兜底，确保上层不挂起。
+            if pending_usage is not None:
+                input_tokens, cache_read, output_tokens = _openai_usage_counts(pending_usage)
+                yield StreamEnd(
+                    stop_reason=_map_finish_reason(finish_reason),
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cache_read=cache_read,
+                    cache_creation=0,
+                )
+            else:
+                yield StreamEnd(stop_reason=_map_finish_reason(finish_reason))
 
         except _openai.AuthenticationError as e:
             raise AuthenticationError(f"Invalid API key: {e}") from e
@@ -636,9 +697,9 @@ class OpenAICompatClient(LLMClient):
 def create_client(config: ProviderConfig) -> LLMClient:
     if config.protocol == "anthropic":
         return AnthropicClient(config)
-    elif config.protocol == "openai":
+    if config.protocol == "openai":
         return OpenAIClient(config)
-    elif config.protocol == "openai-compat":
+    if config.protocol == "openai-compat":
         return OpenAICompatClient(config)
     raise ValueError(f"Unknown protocol: {config.protocol}")
 
@@ -663,7 +724,8 @@ async def resolve_context_window(config: ProviderConfig) -> None:
 
     try:
         client = create_client(config)
-    except Exception:
+    except Exception as e:
+        log.debug("context-window probe client creation failed: %s", e)
         return
     fetch = getattr(client, "fetch_model_context_window", None)
     if fetch is None:
@@ -671,7 +733,8 @@ async def resolve_context_window(config: ProviderConfig) -> None:
 
     try:
         window = await fetch()
-    except Exception:
+    except Exception as e:
+        log.debug("context-window probe fetch failed: %s", e)
         window = None
     if window:
         config.set_fetched_context_window(window)

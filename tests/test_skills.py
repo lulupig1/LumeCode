@@ -1,14 +1,14 @@
-﻿
 """Skill 系统的测试 —— 包括 parser、loader、executor 以及 LoadSkill 工具。"""
+
 from __future__ import annotations
 
-import json
 import textwrap
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from lumecode.skills.loader import SkillLoader
 from lumecode.skills.parser import (
     SkillDef,
     SkillParseError,
@@ -16,7 +16,6 @@ from lumecode.skills.parser import (
     parse_skill_file,
     substitute_arguments,
 )
-from lumecode.skills.loader import SkillLoader
 from lumecode.tools import ToolRegistry
 
 # ---------------------------------------------------------------------------
@@ -55,6 +54,7 @@ FORK_SKILL_MD = textwrap.dedent("""\
 # Parser 测试
 # ---------------------------------------------------------------------------
 
+
 class TestParseFrontmatter:
     def test_valid(self) -> None:
         meta, body = parse_frontmatter(VALID_SKILL_MD)
@@ -77,6 +77,7 @@ class TestParseFrontmatter:
     def test_non_dict_frontmatter(self) -> None:
         with pytest.raises(SkillParseError, match="must be a YAML mapping"):
             parse_frontmatter("---\n- list\n- item\n---\nbody")
+
 
 class TestParseSkillFile:
     def test_valid_file(self, tmp_path: Path) -> None:
@@ -123,6 +124,7 @@ class TestParseSkillFile:
         assert skill.mode == "fork"
         assert skill.context == "none"
 
+
 class TestSubstituteArguments:
     def test_with_args(self) -> None:
         result = substitute_arguments("Do $ARGUMENTS now", "something cool")
@@ -141,9 +143,11 @@ class TestSubstituteArguments:
         result = substitute_arguments("$ARGUMENTS and $ARGUMENTS", "x")
         assert result == "x and x"
 
+
 # ---------------------------------------------------------------------------
 # Loader 测试
 # ---------------------------------------------------------------------------
+
 
 class TestSkillLoader:
     def test_load_builtins_empty(self) -> None:
@@ -159,14 +163,16 @@ class TestSkillLoader:
         skills_dir = tmp_path / ".lumecode" / "skills"
         skills_dir.mkdir(parents=True)
         custom = skills_dir / "commit.md"
-        custom.write_text(textwrap.dedent("""\
+        custom.write_text(
+            textwrap.dedent("""\
             ---
             name: commit
             description: Custom commit
             mode: inline
             ---
             Custom prompt
-        """))
+        """)
+        )
         loader = SkillLoader(str(tmp_path))
         skills = loader.load_all()
         assert skills["commit"].description == "Custom commit"
@@ -196,24 +202,28 @@ class TestSkillLoader:
         skills_dir = tmp_path / ".lumecode" / "skills"
         skills_dir.mkdir(parents=True)
         f = skills_dir / "custom.md"
-        f.write_text(textwrap.dedent("""\
+        f.write_text(
+            textwrap.dedent("""\
             ---
             name: custom
             description: v1
             ---
             Prompt v1
-        """))
+        """)
+        )
         loader = SkillLoader(str(tmp_path))
         loader.load_all()
         assert loader.get("custom").description == "v1"
 
-        f.write_text(textwrap.dedent("""\
+        f.write_text(
+            textwrap.dedent("""\
             ---
             name: custom
             description: v2
             ---
             Prompt v2
-        """))
+        """)
+        )
         skill = loader.get("custom")
         assert skill.description == "v2"
         assert "v2" in skill.prompt_body
@@ -222,13 +232,15 @@ class TestSkillLoader:
         skills_dir = tmp_path / ".lumecode" / "skills"
         skills_dir.mkdir(parents=True)
         f = skills_dir / "custom.md"
-        f.write_text(textwrap.dedent("""\
+        f.write_text(
+            textwrap.dedent("""\
             ---
             name: custom
             description: good
             ---
             Good prompt
-        """))
+        """)
+        )
         loader = SkillLoader(str(tmp_path))
         loader.load_all()
 
@@ -242,13 +254,15 @@ class TestSkillLoader:
         skill_dir = skills_dir / "my-skill"
         skill_dir.mkdir(parents=True)
         skill_md = skill_dir / "SKILL.md"
-        skill_md.write_text(textwrap.dedent("""\
+        skill_md.write_text(
+            textwrap.dedent("""\
             ---
             name: my-skill
             description: A directory skill
             ---
             SOP here
-        """))
+        """)
+        )
         loader = SkillLoader(str(tmp_path))
         skills = loader.load_all()
         assert "my-skill" in skills
@@ -265,13 +279,15 @@ class TestSkillLoader:
         bad = skills_dir / "broken.md"
         bad.write_text("not valid frontmatter")
         good = skills_dir / "valid.md"
-        good.write_text(textwrap.dedent("""\
+        good.write_text(
+            textwrap.dedent("""\
             ---
             name: valid
             description: Works fine
             ---
             Prompt
-        """))
+        """)
+        )
         loader = SkillLoader(str(tmp_path))
         skills = loader.load_all()
         assert "valid" in skills
@@ -288,6 +304,7 @@ class TestSkillLoader:
 # ---------------------------------------------------------------------------
 # LoadSkill 工具
 # ---------------------------------------------------------------------------
+
 
 class TestLoadSkillTool:
     @pytest.mark.asyncio
@@ -348,9 +365,11 @@ class TestLoadSkillTool:
         assert tool.is_system_tool is True
         assert tool.category == "read"
 
+
 # ---------------------------------------------------------------------------
 # Agent 集成
 # ---------------------------------------------------------------------------
+
 
 class TestAgentSkillIntegration:
     def test_env_context_does_not_include_active_skills(self) -> None:

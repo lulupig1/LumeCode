@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -19,25 +23,24 @@ class PromptSection:
 @dataclass
 class EnvironmentContext:
     """运行环境上下文（对齐 Go 版 EnvironmentContext）。"""
+
     work_dir: str
-    os_name: str       # 操作系统名称（如 Linux, Darwin）
-    arch: str          # 架构（如 x86_64, arm64）
-    shell: str         # 当前 shell（如 /bin/bash）
+    os_name: str  # 操作系统名称（如 Linux, Darwin）
+    arch: str  # 架构（如 x86_64, arm64）
+    shell: str  # 当前 shell（如 /bin/bash）
     is_git_repo: bool  # 工作目录是否在 git 仓库内
-    git_branch: str    # 当前 git 分支（非 git 仓库时为空）
-    model: str         # 当前使用的模型名称
-    date: str          # 当前日期（YYYY-MM-DD）
+    git_branch: str  # 当前 git 分支（非 git 仓库时为空）
+    model: str  # 当前使用的模型名称
+    date: str  # 当前日期（YYYY-MM-DD）
 
 
 class PromptBuilder:
     def __init__(self) -> None:
         self._sections: list[PromptSection] = []
 
-
     def add(self, section: PromptSection) -> PromptBuilder:
         self._sections.append(section)
         return self
-
 
     def build(self) -> str:
         self._sections.sort(key=lambda s: s.priority)
@@ -170,18 +173,22 @@ def detect_environment(work_dir: str) -> EnvironmentContext:
     try:
         out = subprocess.run(
             ["git", "-C", work_dir, "rev-parse", "--is-inside-work-tree"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if out.returncode == 0 and out.stdout.strip() == "true":
             is_git = True
             br = subprocess.run(
                 ["git", "-C", work_dir, "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if br.returncode == 0:
                 branch = br.stdout.strip()
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("git branch detection failed: %s", e)
 
     return EnvironmentContext(
         work_dir=work_dir,
@@ -286,9 +293,7 @@ def build_plan_mode_reentry_reminder(plan_path: str, plan_exists: bool) -> str:
     return _PLAN_MODE_REENTRY_REMINDER.format(plan_path=plan_path)
 
 
-def build_plan_mode_reminder(
-    plan_path: str, plan_exists: bool, iteration: int
-) -> str:
+def build_plan_mode_reminder(plan_path: str, plan_exists: bool, iteration: int) -> str:
     if plan_exists:
         plan_file_info = (
             f"Plan file: {plan_path}\n"
@@ -316,6 +321,7 @@ def build_plan_mode_reminder(
 # 对外接口
 # ---------------------------------------------------------------------------
 
+
 def build_system_prompt(
     hook_prompts: list[str] | None = None,
     coordinator_mode: bool = False,
@@ -324,30 +330,42 @@ def build_system_prompt(
     skill_section: str = "",
     memory_section: str = "",
     work_dir: str = ".",
+    harness: Any | None = None,
 ) -> str:
     if coordinator_mode:
         from lumecode.teams.coordinator import get_coordinator_system_prompt
+
         return get_coordinator_system_prompt(agent_catalog=agent_catalog)
 
     b = PromptBuilder()
-    b.add(IDENTITY_SECTION)
-    b.add(SYSTEM_SECTION)
-    b.add(DOING_TASKS_SECTION)
-    b.add(EXECUTING_ACTIONS_SECTION)
-    b.add(USING_TOOLS_SECTION)
-    b.add(TONE_STYLE_SECTION)
-    b.add(TEXT_OUTPUT_SECTION)
+    b.add(_harness_section(harness, "identity", IDENTITY_SECTION))
+    b.add(_harness_section(harness, "system", SYSTEM_SECTION))
+    b.add(_harness_section(harness, "doing-tasks", DOING_TASKS_SECTION))
+    b.add(_harness_section(harness, "executing-actions", EXECUTING_ACTIONS_SECTION))
+    b.add(_harness_section(harness, "using-tools", USING_TOOLS_SECTION))
+    b.add(_harness_section(harness, "tone-style", TONE_STYLE_SECTION))
+    b.add(_harness_section(harness, "text-output", TEXT_OUTPUT_SECTION))
     b.add(environment_section(work_dir))
 
     if custom_instructions:
-        b.add(PromptSection(
-            name="CustomInstructions",
-            priority=80,
-            content=f"# Project Instructions\n\n{custom_instructions}",
-        ))
+        b.add(
+            PromptSection(
+                name="CustomInstructions",
+                priority=80,
+                content=f"# Project Instructions\n\n{custom_instructions}",
+            )
+        )
 
     if skill_section:
         b.add(PromptSection(name="Skills", priority=90, content=skill_section))
+
+    # 经验段排在 Skills 之后、Memory 之前：经验是行为规则，应比长期记忆
+    # 更靠近末尾（模型通常更重视靠后的指令），但不能盖过 Memory 里的
+    # 用户显式偏好。
+    if harness is not None:
+        experience = harness.render_injection()
+        if experience:
+            b.add(PromptSection(name="Experiences", priority=92, content=experience))
 
     if memory_section:
         b.add(PromptSection(name="Memory", priority=95, content=memory_section))
@@ -358,6 +376,19 @@ def build_system_prompt(
         result += "\n\n# Hook Injected Context\n" + "\n".join(hook_prompts)
 
     return result
+
+
+def _harness_section(harness: Any | None, key: str, default: PromptSection) -> PromptSection:
+    """基础分节优先取 ``.lumecode/harness/prompt/<key>.md``，缺失时回退内置常量。
+
+    回退是刻意的：没有 harness 目录时输出必须与旧版本逐字相同。
+    """
+    if harness is None:
+        return default
+    content = harness.base_section(key)
+    if content is None:
+        return default
+    return PromptSection(name=default.name, priority=default.priority, content=content)
 
 
 def build_environment_context(

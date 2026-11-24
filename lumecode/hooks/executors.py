@@ -2,29 +2,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from urllib.request import Request, urlopen
 from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from lumecode.hooks.models import Action, ActionResult, HookContext
+from lumecode.process import spawn_kwargs, terminate_process_tree
 
 log = logging.getLogger(__name__)
 
 
 async def execute_command(action: Action, ctx: HookContext) -> ActionResult:
-    command = ctx.expand(action.command)
+    # shell_quote=True：被插值进来的工具参数会被转义成字面量，
+    # 防止模型通过构造参数（如 file_path="; rm -rf ~"）注入命令。
+    command = ctx.expand(action.command, shell_quote=True)
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            **spawn_kwargs(),
         )
         try:
-            stdout, _ = await asyncio.wait_for(
-                proc.communicate(), timeout=action.timeout
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=action.timeout)
+        except TimeoutError:
+            await terminate_process_tree(proc)
             return ActionResult(
                 output=f"Command timed out after {action.timeout}s: {command}",
                 success=False,
@@ -50,7 +51,6 @@ async def execute_http(action: Action, ctx: HookContext) -> ActionResult:
         headers[k] = ctx.expand(v)
     if body and "Content-Type" not in headers:
         headers["Content-Type"] = "application/json"
-
 
     def _do_request() -> ActionResult:
         try:

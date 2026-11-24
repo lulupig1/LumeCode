@@ -4,8 +4,9 @@ import asyncio
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from lumecode.agent import Agent
@@ -31,18 +32,17 @@ class BackgroundTask:
     result: str = ""
     start_time: float = field(default_factory=time.monotonic)
     end_time: float | None = None
-    cancel: Callable[[], None] | None = None
+    # 取消句柄，指向底层 asyncio.Task.cancel（形参可带可选 message，
+    # 故用 Callable[..., Any] 而非 Callable[[], None]）。
+    cancel: Callable[..., Any] | None = None
     progress: ProgressInfo = field(default_factory=ProgressInfo)
 
 
 class TaskManager:
-
-
     def __init__(self) -> None:
         self._tasks: dict[str, BackgroundTask] = {}
         self._notify_queue: asyncio.Queue[str] = asyncio.Queue()
         self._async_tasks: dict[str, asyncio.Task[None]] = {}
-
 
     def launch(
         self,
@@ -60,18 +60,13 @@ class TaskManager:
         )
         self._tasks[task_id] = bg
 
-        async_task = asyncio.create_task(
-            self._run_background(task_id, fork_conversation)
-        )
+        async_task = asyncio.create_task(self._run_background(task_id, fork_conversation))
         self._async_tasks[task_id] = async_task
 
         bg.cancel = async_task.cancel
         return task_id
 
-
-    async def _run_background(
-        self, task_id: str, fork_conversation: Any = None
-    ) -> None:
+    async def _run_background(self, task_id: str, fork_conversation: Any = None) -> None:
         bg = self._tasks.get(task_id)
         if bg is None:
             return
@@ -88,6 +83,7 @@ class TaskManager:
                 mailbox = bg.agent._team_manager.get_mailbox(bg.agent.team_name)
                 if mailbox:
                     from lumecode.teams.mailbox import create_message
+
                     msg = create_message(
                         from_agent=bg.name,
                         to_agent="lead",
@@ -118,7 +114,7 @@ class TaskManager:
             bg.status = "cancelled"
             bg.result = "Task was cancelled"
         except Exception as e:
-            log.error("Background task %s failed: %s", task_id, e)
+            log.exception("Background task %s failed", task_id)
             bg.status = "failed"
             bg.result = f"Error: {e}"
         finally:
@@ -127,7 +123,6 @@ class TaskManager:
             bg.progress.output_tokens = bg.agent.total_output_tokens
             self._async_tasks.pop(task_id, None)
             await self._notify_queue.put(task_id)
-
 
     def adopt_running(
         self,
@@ -151,7 +146,6 @@ class TaskManager:
         bg.cancel = async_task.cancel
         return task_id
 
-
     async def _continue_background(self, task_id: str) -> None:
         bg = self._tasks.get(task_id)
         if bg is None:
@@ -164,7 +158,7 @@ class TaskManager:
         except asyncio.CancelledError:
             bg.status = "cancelled"
         except Exception as e:
-            log.error("Background task %s failed: %s", task_id, e)
+            log.exception("Background task %s failed", task_id)
             bg.status = "failed"
             bg.result = f"Error: {e}"
         finally:

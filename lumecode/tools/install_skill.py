@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -13,7 +14,7 @@ if TYPE_CHECKING:
 class InstallSkillParams(BaseModel):
     url: str = Field(
         description=(
-            'The Skill URL to fetch. Examples: '
+            "The Skill URL to fetch. Examples: "
             '"https://www.skills.sh/anthropics/skills/frontend-design", '
             '"https://github.com/anthropics/skills/tree/main/skills/pdf".'
         )
@@ -54,7 +55,7 @@ class InstallSkillTool(Tool):
     async def execute(self, params: BaseModel) -> ToolResult:
         assert isinstance(params, InstallSkillParams)
 
-        from lumecode.skills.install import parse_skill_url, install_skill
+        from lumecode.skills.install import install_skill, parse_skill_url
 
         # 解析 URL
         try:

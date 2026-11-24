@@ -1,9 +1,10 @@
-
 from __future__ import annotations
 
+import contextlib
 import time
 
 from lumecode.commands.registry import Command, CommandType
+from lumecode.conversation import HistoryReplacement
 
 
 async def _handle_rewind(ctx) -> None:
@@ -43,21 +44,30 @@ async def _handle_rewind(ctx) -> None:
 
     option = 1
     if len(parts) > 1:
-        try:
+        with contextlib.suppress(ValueError):
             option = int(parts[1])
-        except ValueError:
-            pass
 
     snap = snapshots[idx]
 
+    def _truncate_conversation() -> None:
+        # 通过 replace sink 写一条 rollback 标记：重启后 resume 重放出的历史
+        # 与回退后的内存历史一致，回退不会因为重启而"复活"。
+        ctx.conversation.replace_history(
+            ctx.conversation.history[: snap.message_index],
+            HistoryReplacement(
+                kind="rollback",
+                message_index=snap.message_index,
+            ),
+        )
+
     if option == 1:
         changed = fh.rewind(idx)
-        ctx.conversation.replace_history(ctx.conversation.history[: snap.message_index])
+        _truncate_conversation()
         ctx.ui.add_system_message(
             f"⟲ Rewound to checkpoint {idx + 1}. Restored {len(changed)} file(s) and conversation."
         )
     elif option == 2:
-        ctx.conversation.replace_history(ctx.conversation.history[: snap.message_index])
+        _truncate_conversation()
         ctx.ui.add_system_message(
             f"⟲ Rewound conversation to checkpoint {idx + 1}. Files unchanged."
         )

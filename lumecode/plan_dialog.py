@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import ClassVar
 
 from textual.app import ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Vertical
 from textual.message import Message
 from textual.widgets import Static
@@ -25,7 +26,7 @@ _OPTIONS = [
 class InlinePlanWidget(Vertical, can_focus=True):
     """内联的计划审批组件，格式与 Go 版 TUI 保持一致。"""
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("up", "cursor_up", "Up", priority=True),
         Binding("down", "cursor_down", "Down", priority=True),
         Binding("enter", "select", "Select", priority=True),
@@ -34,8 +35,6 @@ class InlinePlanWidget(Vertical, can_focus=True):
     ]
 
     class Responded(Message):
-
-
         def __init__(self, choice: PlanChoice, feedback: str = "") -> None:
             super().__init__()
             self.choice = choice
@@ -46,7 +45,6 @@ class InlinePlanWidget(Vertical, can_focus=True):
         self._cursor = 0
         self._input = ""
 
-
     def compose(self) -> ComposeResult:
         yield Static(self._build_content(), id="plan-content")
 
@@ -55,8 +53,10 @@ class InlinePlanWidget(Vertical, can_focus=True):
 
     def _build_content(self) -> str:
         lines = [
-            "\n [bold #875fff]LumeCode has written up a plan and is ready to execute. "
-            "Would you like to proceed?[/bold #875fff]\n"
+            (
+                "\n [bold #875fff]LumeCode has written up a plan and is ready to execute. "
+                "Would you like to proceed?[/bold #875fff]\n"
+            )
         ]
         for i, (label, _choice) in enumerate(_OPTIONS):
             if i == self._cursor:
@@ -74,12 +74,10 @@ class InlinePlanWidget(Vertical, can_focus=True):
     def _refresh(self) -> None:
         self.query_one("#plan-content", Static).update(self._build_content())
 
-
     def action_cursor_up(self) -> None:
         if self._cursor > 0:
             self._cursor -= 1
             self._refresh()
-
 
     def action_cursor_down(self) -> None:
         if self._cursor < 2:
@@ -100,7 +98,6 @@ class InlinePlanWidget(Vertical, can_focus=True):
     def action_approve_with_feedback(self) -> None:
         if self._cursor == 2 and self._input:
             self.post_message(self.Responded(PlanChoice.FEEDBACK, self._input))
-
 
     def on_key(self, event) -> None:
         if self._cursor != 2:

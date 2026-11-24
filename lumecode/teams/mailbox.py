@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
-import os
-import random
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+from lumecode.fileutil import atomic_write_text, file_lock
 
 
 @dataclass
@@ -21,7 +22,6 @@ class MailboxMessage:
     timestamp: float = 0.0
     read: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
-
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -56,43 +56,13 @@ class Mailbox:
     def _with_lock(
         self,
         agent_id: str,
-        fn: callable,
+        fn: Callable[[list[MailboxMessage]], list[MailboxMessage]],
     ) -> Any:
         """Acquire a file lock, read inbox, apply *fn* mutation, write back."""
-        lock_file = self._lock_path(agent_id)
-
-        # Acquire lock with retries (matching Go: 10 attempts, stale > 10s)
-        lock_fd = None
-        last_err: Exception | None = None
-        for _ in range(10):
-            try:
-                fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-                lock_fd = fd
-                os.close(fd)
-                break
-            except FileExistsError:
-                # Lock exists — check if stale (> 10s old)
-                try:
-                    info = lock_file.stat()
-                    if time.time() - info.st_mtime > 10:
-                        lock_file.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                sleep_ms = 5 + random.randint(0, 95)  # 5–100ms
-                time.sleep(sleep_ms / 1000)
-            except OSError as e:
-                last_err = e
-                break
-
-        if lock_fd is None and last_err is not None:
-            raise last_err
-
-        try:
+        with file_lock(self._lock_path(agent_id)):
             messages = self._read_inbox(agent_id)
             messages = fn(messages)
             self._write_inbox(agent_id, messages)
-        finally:
-            lock_file.unlink(missing_ok=True)
 
     # ── inbox I/O ────────────────────────────────────────────────
 
@@ -113,18 +83,23 @@ class Mailbox:
             ensure_ascii=False,
             indent=2,
         )
-        path.write_text(data, encoding="utf-8")
+        # 原子替换：并发读者要么读到旧的完整内容，要么读到新的完整内容，
+        # 绝不会读到写了一半的 JSON（旧实现直接 write_text 截断重写，
+        # 无锁的 read() 会因此解析失败并静默返回空列表，即丢消息）。
+        atomic_write_text(path, data)
 
     # ── public API ───────────────────────────────────────────────
 
     def write(self, agent_id: str, message: MailboxMessage) -> None:
         """Append a message to *agent_id*'s inbox (thread-safe)."""
+
         def _append(msgs: list[MailboxMessage]) -> list[MailboxMessage]:
             message.read = False
             if message.timestamp == 0.0:
                 message.timestamp = time.time()
             msgs.append(message)
             return msgs
+
         self._with_lock(agent_id, _append)
 
     def read(self, agent_id: str) -> list[MailboxMessage]:
@@ -142,6 +117,7 @@ class Mailbox:
                     result.append(m)
                     m.read = True
             return msgs
+
         self._with_lock(agent_id, _mark_read)
         return result
 

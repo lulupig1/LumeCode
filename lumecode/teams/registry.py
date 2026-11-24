@@ -10,7 +10,6 @@ class AgentNameRegistry:
     def __init__(self) -> None:
         self._names: dict[str, str] = {}  # name -> agent_id
 
-
     @classmethod
     def instance(cls) -> AgentNameRegistry:
         if cls._instance is None:
@@ -19,12 +18,10 @@ class AgentNameRegistry:
                     cls._instance = cls()
         return cls._instance
 
-
     @classmethod
     def reset(cls) -> None:
         with cls._lock:
             cls._instance = None
-
 
     def register(self, name: str, agent_id: str) -> None:
         self._names[name] = agent_id
@@ -38,7 +35,6 @@ class AgentNameRegistry:
 
     def unregister(self, name: str) -> None:
         self._names.pop(name, None)
-
 
     def list_all(self) -> dict[str, str]:
         return dict(self._names)

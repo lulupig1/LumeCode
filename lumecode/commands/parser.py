@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from lumecode.commands.registry import CommandRegistry
@@ -35,4 +34,3 @@ def complete(registry: CommandRegistry, prefix: str) -> list[tuple[str, str]]:
             matches.append((display, "/" + cmd.name))
     matches.sort(key=lambda x: x[1])
     return matches[:8]
-

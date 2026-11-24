@@ -1,5 +1,3 @@
-
-
 from lumecode.memory.auto_memory import (
     ENTRYPOINT_NAME,
     MemoryFile,
@@ -25,10 +23,11 @@ from lumecode.memory.session import (
     SessionRecord,
     generate_session_summary,
     make_compact_boundary,
+    make_rollback,
     parse_compact_boundary,
+    strip_persisted_injected_context,
     validate_message_chain,
 )
-
 
 __all__ = [
     "ENTRYPOINT_NAME",
@@ -49,10 +48,11 @@ __all__ = [
     "is_auto_mem_path",
     "load_instructions",
     "make_compact_boundary",
+    "make_rollback",
     "parse_compact_boundary",
     "parse_frontmatter",
     "process_includes",
     "render_reminder",
+    "strip_persisted_injected_context",
     "validate_message_chain",
 ]
-

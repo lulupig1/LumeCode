@@ -5,12 +5,14 @@ import os
 import shutil
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from lumecode.conversation import (
     ConversationManager,
+    HistoryReplacement,
     Message,
     ToolResultBlock,
     estimate_tokens,
@@ -78,6 +80,7 @@ class CompactEvent:
 # 内容替换状态 — Design B（决策冻结，不做原地修改）
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ContentReplacementState:
     seen_ids: set[str] = field(default_factory=set)
@@ -105,19 +108,23 @@ def clone_replacement_state(src: ContentReplacementState) -> ContentReplacementS
 REPLACEMENT_RECORDS_FILENAME = "replacement_records.jsonl"
 
 
-def append_replacement_records(
-    session_dir: Path, records: list[ContentReplacementRecord]
-) -> None:
+def append_replacement_records(session_dir: Path, records: list[ContentReplacementRecord]) -> None:
     if not records:
         return
     path = session_dir / REPLACEMENT_RECORDS_FILENAME
     with path.open("a", encoding="utf-8") as f:
         for r in records:
-            f.write(json.dumps({
-                "kind": r.kind,
-                "tool_use_id": r.tool_use_id,
-                "replacement": r.replacement,
-            }, ensure_ascii=False) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "kind": r.kind,
+                        "tool_use_id": r.tool_use_id,
+                        "replacement": r.replacement,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
 
 
 def load_replacement_records(session_dir: Path) -> list[ContentReplacementRecord]:
@@ -131,11 +138,13 @@ def load_replacement_records(session_dir: Path) -> list[ContentReplacementRecord
             if not line:
                 continue
             obj = json.loads(line)
-            out.append(ContentReplacementRecord(
-                kind=obj.get("kind", "tool-result"),
-                tool_use_id=obj["tool_use_id"],
-                replacement=obj["replacement"],
-            ))
+            out.append(
+                ContentReplacementRecord(
+                    kind=obj.get("kind", "tool-result"),
+                    tool_use_id=obj["tool_use_id"],
+                    replacement=obj["replacement"],
+                )
+            )
     return out
 
 
@@ -164,6 +173,7 @@ def reconstruct_replacement_state(
 # Session 目录管理
 # ---------------------------------------------------------------------------
 
+
 def ensure_session_dir(work_dir: str) -> Path:
     session_dir = Path(work_dir) / SESSION_SUBDIR
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -179,6 +189,7 @@ def cleanup_tool_results(session_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # Layer 1：大型工具结果落盘
 # ---------------------------------------------------------------------------
+
 
 def persist_tool_result(tool_use_id: str, content: str, session_dir: Path) -> Path:
     file_path = session_dir / f"{tool_use_id}.txt"
@@ -203,8 +214,6 @@ def make_persisted_preview(content: str, file_path: Path) -> str:
         f"{preview}\n"
         f"</persisted-output>"
     )
-
-
 
 
 def _is_spill_readback(tool_use_id: str, tool_use_index: dict, abs_spill_dir: str) -> bool:
@@ -258,9 +267,12 @@ def apply_tool_result_budget(
                 # 已被外部（如某些工具本身）打上 persisted-output 标签 —— 视为已知决策
                 state.seen_ids.add(tr.tool_use_id)
                 state.replacements[tr.tool_use_id] = tr.content
-                new_records.append(ContentReplacementRecord(
-                    tool_use_id=tr.tool_use_id, replacement=tr.content,
-                ))
+                new_records.append(
+                    ContentReplacementRecord(
+                        tool_use_id=tr.tool_use_id,
+                        replacement=tr.content,
+                    )
+                )
             else:
                 fresh.append(tr)
 
@@ -275,9 +287,12 @@ def apply_tool_result_budget(
                 preview = make_persisted_preview(tr.content, fp)
                 state.replacements[tr.tool_use_id] = preview
                 state.seen_ids.add(tr.tool_use_id)
-                new_records.append(ContentReplacementRecord(
-                    tool_use_id=tr.tool_use_id, replacement=preview,
-                ))
+                new_records.append(
+                    ContentReplacementRecord(
+                        tool_use_id=tr.tool_use_id,
+                        replacement=preview,
+                    )
+                )
                 # 就地替换消息内容
                 tr.content = preview
                 persisted_p1.add(tr.tool_use_id)
@@ -285,12 +300,16 @@ def apply_tool_result_budget(
         # Pass 2：聚合超限
         remaining = [tr for tr in fresh if tr.tool_use_id not in persisted_p1]
         total = sum(
-            len(state.replacements[tr.tool_use_id]) if tr.tool_use_id in state.replacements
+            len(state.replacements[tr.tool_use_id])
+            if tr.tool_use_id in state.replacements
             else len(tr.content)
             for tr in msg.tool_results
-            if tr.tool_use_id not in [r.tool_use_id for r in fresh
-                                       if r.tool_use_id not in persisted_p1
-                                       and r.tool_use_id not in state.replacements]
+            if tr.tool_use_id
+            not in [
+                r.tool_use_id
+                for r in fresh
+                if r.tool_use_id not in persisted_p1 and r.tool_use_id not in state.replacements
+            ]
         ) + sum(len(tr.content) for tr in remaining)
         # 重新简单计算：所有 tool_results 的当前内容长度之和
         total = sum(len(tr.content) for tr in msg.tool_results)
@@ -305,9 +324,12 @@ def apply_tool_result_budget(
                 preview = make_persisted_preview(tr.content, fp)
                 state.replacements[tr.tool_use_id] = preview
                 state.seen_ids.add(tr.tool_use_id)
-                new_records.append(ContentReplacementRecord(
-                    tool_use_id=tr.tool_use_id, replacement=preview,
-                ))
+                new_records.append(
+                    ContentReplacementRecord(
+                        tool_use_id=tr.tool_use_id,
+                        replacement=preview,
+                    )
+                )
                 # 就地替换消息内容
                 tr.content = preview
 
@@ -322,6 +344,7 @@ def apply_tool_result_budget(
 # ---------------------------------------------------------------------------
 # Layer 2：全对话摘要（Auto-Compact）
 # ---------------------------------------------------------------------------
+
 
 def compute_compact_threshold(context_window: int, manual: bool = False) -> int:
     effective = context_window - SUMMARY_OUTPUT_RESERVE
@@ -432,7 +455,7 @@ def extract_summary(llm_output: str) -> str:
     end = llm_output.find("</summary>")
     if start == -1 or end == -1:
         return llm_output
-    return llm_output[start + len("<summary>"):end].strip()
+    return llm_output[start + len("<summary>") : end].strip()
 
 
 def build_compact_messages(
@@ -441,7 +464,9 @@ def build_compact_messages(
     has_keep_tail: bool = False,
     transcript_path: str = "",
 ) -> list[Message]:
-    content = "本次会话延续自之前的对话，因上下文空间不足进行了压缩。以下是早期对话的摘要：\n\n" + summary
+    content = (
+        "本次会话延续自之前的对话，因上下文空间不足进行了压缩。以下是早期对话的摘要：\n\n" + summary
+    )
     if has_keep_tail:
         content += "\n\n近期消息已原样保留。"
     if transcript_path:
@@ -497,17 +522,13 @@ class RecoveryState:
         if not path:
             return
         with self._lock:
-            self._files[path] = FileReadRecord(
-                path=path, content=content, timestamp=time.time()
-            )
+            self._files[path] = FileReadRecord(path=path, content=content, timestamp=time.time())
 
     def record_skill_invocation(self, name: str, body: str) -> None:
         if not name:
             return
         with self._lock:
-            self._skills[name] = SkillInvocationRecord(
-                name=name, body=body, timestamp=time.time()
-            )
+            self._skills[name] = SkillInvocationRecord(name=name, body=body, timestamp=time.time())
 
     def snapshot_files(self, limit: int) -> list[FileReadRecord]:
         with self._lock:
@@ -551,7 +572,7 @@ def _first_line(s: str) -> str:
 
 def build_recovery_attachment(
     state: RecoveryState | None,
-    tool_schemas: list[Mapping[str, Any]] | None,
+    tool_schemas: Sequence[Mapping[str, Any]] | None,
 ) -> str:
     """渲染压缩后附件的四个小节。
 
@@ -564,13 +585,13 @@ def build_recovery_attachment(
     if state is not None:
         files = state.snapshot_files(RECOVERY_FILE_LIMIT)
         if files:
-            buf = ["## 最近读过的文件\n",
-                   "以下快照是文件读取工具上次返回的内容。如需当前字节请重新读取。\n"]
+            buf = [
+                "## 最近读过的文件\n",
+                "以下快照是文件读取工具上次返回的内容。如需当前字节请重新读取。\n",
+            ]
             for rec in files:
                 content = _truncate_by_tokens(rec.content, RECOVERY_TOKENS_PER_FILE)
-                ts = time.strftime(
-                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(rec.timestamp)
-                )
+                ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(rec.timestamp))
                 buf.append(f"### {rec.path}  (read {ts})\n")
                 buf.append("```\n")
                 buf.append(content)
@@ -581,8 +602,7 @@ def build_recovery_attachment(
 
         skills = state.snapshot_skills()
         if skills:
-            buf = ["## 已激活的技能\n",
-                   "下列技能在本会话中被调用过，其触发条件仍然适用。\n"]
+            buf = ["## 已激活的技能\n", "下列技能在本会话中被调用过，其触发条件仍然适用。\n"]
             used = 0
             emitted = False
             for sk in skills:
@@ -597,8 +617,7 @@ def build_recovery_attachment(
                 sections.append("".join(buf))
 
     if tool_schemas:
-        buf = ["## 可用工具\n",
-               "你仍然可以调用以下工具，需要时直接发起调用即可：\n"]
+        buf = ["## 可用工具\n", "你仍然可以调用以下工具，需要时直接发起调用即可：\n"]
         for t in tool_schemas:
             name = t.get("name") if isinstance(t, Mapping) else None
             if not name:
@@ -669,7 +688,9 @@ def _compute_keep_start_index(messages: list[Message]) -> int:
             break
 
         kept_tokens += tok
-        kept_count += 1
+        # kept_count 是"已保留消息数"这个语义计数，只在走到这里时自增，
+        # 与循环迭代次数（i）无关——用 enumerate 会算错，故显式计数。
+        kept_count += 1  # noqa: SIM113
         keep_start = i
 
         # 保底条件已满足（token 下限或消息条数下限达到其一）：
@@ -722,7 +743,6 @@ class CompactCircuitBreaker:
     def record_success(self) -> None:
         self.consecutive_failures = 0
 
-
     def is_open(self) -> bool:
         return self.consecutive_failures >= self.max_failures
 
@@ -766,6 +786,7 @@ class UsageAnchor:
 # Auto-compact 编排器
 # ---------------------------------------------------------------------------
 
+
 async def auto_compact(
     conversation: ConversationManager,
     client: Any,
@@ -775,14 +796,28 @@ async def auto_compact(
     manual: bool = False,
     breaker: CompactCircuitBreaker | None = None,
     recovery: RecoveryState | None = None,
-    tool_schemas: list[Mapping[str, Any]] | None = None,
+    tool_schemas: Sequence[Mapping[str, Any]] | None = None,
     transcript_path: str = "",
     budget_messages: list[Message] | None = None,
+    telemetry: Any | None = None,
 ) -> CompactEvent | str | None:
+    """压缩对话历史。
+
+    ``telemetry`` 仅用于记录压缩本身的开销；为空时行为与之前完全一致。
+    """
     # 以真实 API 用量为锚点做阈值判断：current_tokens() 返回上次计费基准
     # （input + cache_read + cache_creation + output）加上锚点之后新增消息的
     # 字符估算。冷启动或刚压缩清空锚点时，退化为对整个 history 做字符估算。
     current = conversation.current_tokens()
+
+    compact_span = None
+    if telemetry is not None:
+        compact_span = telemetry.start_span(
+            "compact",
+            "auto-compact" if not manual else "manual-compact",
+            attributes={"compact.manual": manual, "compact.before_tokens": current},
+            set_current=False,
+        )
 
     if manual:
         # 手动压缩（/compact）：直接走压缩流程，不检查阈值
@@ -792,6 +827,8 @@ async def auto_compact(
         # 1) 软触发线（auto margin 13K）：低于此线不需要压缩
         soft_threshold = compute_compact_threshold(context_window, manual=False)
         if current < soft_threshold:
+            if compact_span is not None:
+                compact_span.discard()
             return None
 
         # 2) 硬触发线（manual margin 3K）：超过此线强制压缩，绕过熔断器，
@@ -803,6 +840,8 @@ async def auto_compact(
         else:
             # 处于软硬阈值之间：走正常的熔断器保护逻辑
             if breaker is not None and breaker.is_open():
+                if compact_span is not None:
+                    compact_span.discard()
                 return "自动压缩已熔断（连续失败 3 次），请手动处理或使用 /compact"
 
     before_tokens = current
@@ -822,6 +861,8 @@ async def auto_compact(
     # 待摘要的前缀太小时退化为不压缩——要么全部消息都落在保留窗口内
     # （keep_start <= 0），要么摘要回收的 token 还不够摘要本身的开销。
     if keep_start <= 0 or _prefix_too_small_to_compact(to_summarize):
+        if compact_span is not None:
+            compact_span.discard()
         return None
 
     messages_for_summary = build_messages(list(to_summarize), protocol)
@@ -831,7 +872,10 @@ async def auto_compact(
     ]
     summary_messages.extend(messages_for_summary)
     summary_messages.append(
-        {"role": "user", "content": "Please provide your summary of the conversation above now. REMINDER: Do NOT call any tools — respond with plain text only."}
+        {
+            "role": "user",
+            "content": "Please provide your summary of the conversation above now. REMINDER: Do NOT call any tools — respond with plain text only.",
+        }
     )
 
     summary_conv = ConversationManager()
@@ -842,18 +886,23 @@ async def auto_compact(
     for msg in to_summarize:
         summary_conv.history.append(msg)
     summary_conv.history.append(
-        Message(role="user", content="Please provide your summary of the conversation above now. REMINDER: Do NOT call any tools — respond with plain text only.")
+        Message(
+            role="user",
+            content="Please provide your summary of the conversation above now. REMINDER: Do NOT call any tools — respond with plain text only.",
+        )
     )
 
     max_retries = 3
     llm_output: str | None = None
 
-    for attempt in range(max_retries):
+    for _attempt in range(max_retries):
         try:
-            from lumecode.tools.base import StreamEnd, StreamEvent, TextDelta
+            from lumecode.tools.base import StreamEnd, TextDelta
 
             collected_text = ""
-            async for event in client.stream(summary_conv, system=SUMMARY_PROMPT, tools=tool_schemas):
+            async for event in client.stream(
+                summary_conv, system=SUMMARY_PROMPT, tools=tool_schemas
+            ):
                 if isinstance(event, TextDelta):
                     collected_text += event.text
                 elif isinstance(event, StreamEnd):
@@ -863,7 +912,7 @@ async def auto_compact(
 
         except Exception as e:
             err_msg = str(e).lower()
-            if "prompt" in err_msg and "long" in err_msg or "too many" in err_msg:
+            if ("prompt" in err_msg and "long" in err_msg) or "too many" in err_msg:
                 groups = _group_messages_by_turn(summary_conv.history[1:-1])
                 drop_count = max(1, len(groups) // 5)
                 remaining = groups[drop_count:]
@@ -875,11 +924,15 @@ async def auto_compact(
                 continue
             if breaker is not None:
                 breaker.record_failure()
+            if compact_span is not None:
+                compact_span.end(status="error", error=str(e))
             return f"摘要生成失败: {e}"
 
     if llm_output is None:
         if breaker is not None:
             breaker.record_failure()
+        if compact_span is not None:
+            compact_span.end(status="error", error="summary generation failed after retries")
         return "摘要生成失败：多次重试后仍超出上下文限制"
 
     summary = extract_summary(llm_output)
@@ -898,11 +951,33 @@ async def auto_compact(
     # 旧的 anchor_count 对应压缩前的消息列表，现在已无意义，
     # 不清零会导致 current_tokens() 对增量的估算出错。
     # 下一次 API 响应会基于重建后的 history 重新锚定。
-    conversation.replace_history(new_messages)
+    # replacement 让持久化层直接写一条 compact_boundary，而不是事后靠
+    # 调用方分别"改内存 + 补磁盘"。
+    summary_message = new_messages[0] if new_messages else None
+    conversation.replace_history(
+        new_messages,
+        HistoryReplacement(
+            kind="compact",
+            message_index=len(new_messages),
+            summary=summary,
+            keep=list(keep_tail),
+            summary_message=summary_message,
+        ),
+    )
     cleanup_tool_results(session_dir)
 
     if breaker is not None:
         breaker.record_success()
+
+    if compact_span is not None:
+        compact_span.end(
+            attributes={
+                "compact.after_tokens": conversation.current_tokens(),
+                "compact.keep_messages": len(keep_tail),
+                "compact.summary_chars": len(summary),
+            },
+            output=summary,
+        )
 
     # 将结构化的 boundary（摘要 + 保留的尾部原文）交给 session 层，
     # 由它持久化为一条 compact_boundary 记录。keep tail 就是拼回重建 history 的那段。

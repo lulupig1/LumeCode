@@ -13,6 +13,8 @@ VALID_PERMISSION_MODES = {
 
 VALID_TEAMMATE_MODES = {"", "in-process"}
 
+VALID_EMBEDDING_PROTOCOLS = {"openai"}
+
 DEFAULT_CONTEXT_WINDOW = 200_000
 
 # 内置的"模型名子串 -> context window（最大输入 token 数）"映射表，
@@ -20,19 +22,19 @@ DEFAULT_CONTEXT_WINDOW = 200_000
 # 按从最具体到最通用排序，第一个子串命中即生效。值仅为合理起始点，
 # 模型更新/重命名后可能过时。如果值不准确，在配置中设置 context_window 覆盖（最高优先级）。
 MODEL_CONTEXT_WINDOWS: list[tuple[str, int]] = [
-    ("1m", 1_000_000),       # 也覆盖 "-1m" 后缀（如 claude-...-1m）
+    ("1m", 1_000_000),  # 也覆盖 "-1m" 后缀（如 claude-...-1m）
     ("gpt-4.1", 1_000_000),  # GPT-4.1 系列的 window 为 1M
     ("gpt-4o", 128_000),
     ("gpt-4-turbo", 128_000),
-    ("o1", 200_000),         # OpenAI 推理模型 o1 / o3 / o4
+    ("o1", 200_000),  # OpenAI 推理模型 o1 / o3 / o4
     ("o3", 200_000),
     ("o4", 200_000),
     ("gpt-3.5", 16_385),
     ("deepseek-v3", 128_000),  # DeepSeek V3
     ("deepseek-r1", 128_000),  # DeepSeek R1
-    ("deepseek", 128_000),     # DeepSeek 通用
-    ("qwen", 128_000),         # 通义千问系列
-    ("glm", 128_000),          # 智谱 GLM 系列
+    ("deepseek", 128_000),  # DeepSeek 通用
+    ("qwen", 128_000),  # 通义千问系列
+    ("glm", 128_000),  # 智谱 GLM 系列
     ("claude", 200_000),
 ]
 
@@ -74,13 +76,15 @@ def validate_providers(raw_providers: list) -> list[dict]:
 
         # 默认为 0（"未设置"）而非硬编码的 window 值：0 会让
         # ProviderConfig.get_context_window() 走四层回退链解析
-        #（自动拉取 / 映射表 / 默认值）。配置中显式指定的值仍须为正整数，
+        # （自动拉取 / 映射表 / 默认值）。配置中显式指定的值仍须为正整数，
         # 且作为最高优先级覆盖。
         context_window = entry.get("context_window", 0)
-        if not isinstance(context_window, int) or isinstance(context_window, bool) or context_window < 0:
-            raise ConfigError(
-                f"Provider #{i + 1}: context_window must be a positive integer"
-            )
+        if (
+            not isinstance(context_window, int)
+            or isinstance(context_window, bool)
+            or context_window < 0
+        ):
+            raise ConfigError(f"Provider #{i + 1}: context_window must be a positive integer")
 
         thinking = entry.get("thinking", False)
         if not isinstance(thinking, bool):
@@ -136,13 +140,9 @@ def validate_mcp_servers(raw_mcp: list | None) -> list[dict]:
         has_command = "command" in entry
         has_url = "url" in entry
         if has_command and has_url:
-            raise ConfigError(
-                f"MCP server '{name}': cannot have both 'command' and 'url'"
-            )
+            raise ConfigError(f"MCP server '{name}': cannot have both 'command' and 'url'")
         if not has_command and not has_url:
-            raise ConfigError(
-                f"MCP server '{name}': must have either 'command' or 'url'"
-            )
+            raise ConfigError(f"MCP server '{name}': must have either 'command' or 'url'")
         servers.append(
             {
                 "name": name,
@@ -241,13 +241,87 @@ def validate_sandbox(raw_sb: dict | None) -> dict:
     return result
 
 
+def validate_embedding(raw_emb: object) -> dict:
+    """校验 memory.embedding 配置段。
+
+    未配置（None / 空字典）时返回空字典，表示"不启用向量召回"，
+    调用方据此回退到 LLM selector。
+    """
+    if raw_emb is None:
+        return {}
+
+    if not isinstance(raw_emb, dict):
+        raise ConfigError("'memory.embedding' must be a mapping")
+
+    if not raw_emb:
+        return {}
+
+    missing = [f for f in ("base_url", "model") if not raw_emb.get(f)]
+    if missing:
+        raise ConfigError(f"'memory.embedding' missing fields: {', '.join(missing)}")
+
+    protocol = raw_emb.get("protocol", "openai")
+    if protocol not in VALID_EMBEDDING_PROTOCOLS:
+        raise ConfigError(
+            f"'memory.embedding.protocol' must be one of: "
+            f"{', '.join(sorted(VALID_EMBEDDING_PROTOCOLS))}"
+        )
+
+    dimensions = raw_emb.get("dimensions", 0)
+    if not isinstance(dimensions, int) or isinstance(dimensions, bool) or dimensions < 0:
+        raise ConfigError("'memory.embedding.dimensions' must be a non-negative integer")
+
+    top_k = raw_emb.get("top_k", 5)
+    if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k <= 0:
+        raise ConfigError("'memory.embedding.top_k' must be a positive integer")
+
+    min_score = raw_emb.get("min_score", 0.45)
+    if not isinstance(min_score, (int, float)) or isinstance(min_score, bool):
+        raise ConfigError("'memory.embedding.min_score' must be a number")
+    if not 0.0 <= float(min_score) <= 1.0:
+        raise ConfigError("'memory.embedding.min_score' must be between 0 and 1")
+
+    text_type = raw_emb.get("uses_text_type", False)
+    if not isinstance(text_type, bool):
+        raise ConfigError("'memory.embedding.uses_text_type' must be a boolean")
+
+    return {
+        "protocol": protocol,
+        "base_url": str(raw_emb["base_url"]),
+        "model": str(raw_emb["model"]),
+        "api_key": str(raw_emb.get("api_key", "")),
+        "dimensions": dimensions,
+        "top_k": top_k,
+        "min_score": float(min_score),
+        "uses_text_type": text_type,
+    }
+
+
+def validate_memory(raw_mem: object) -> dict:
+    """校验顶层 memory 配置段。"""
+    if raw_mem is None:
+        return {"embedding": {}, "extraction_interval": 4}
+
+    if not isinstance(raw_mem, dict):
+        raise ConfigError("'memory' must be a mapping")
+
+    interval = raw_mem.get("extraction_interval", 4)
+    if not isinstance(interval, int) or isinstance(interval, bool) or interval < 0:
+        raise ConfigError("'memory.extraction_interval' must be a non-negative integer")
+
+    return {
+        "embedding": validate_embedding(raw_mem.get("embedding")),
+        "extraction_interval": interval,
+    }
+
+
 def validate_config_structure(raw: object) -> dict:
     """校验的主入口。校验解析后的原始配置，返回清洗后的字典。
 
     返回的字典包含以下键：
         providers、permission_mode、mcp_servers、hooks、
         enable_fork、enable_verification_agent、worktree、
-        teammate_mode、enable_coordinator_mode、sandbox
+        teammate_mode、enable_coordinator_mode、sandbox、memory
     """
     if not isinstance(raw, dict) or "providers" not in raw:
         raise ConfigError("Config must contain a 'providers' list")
@@ -267,4 +341,5 @@ def validate_config_structure(raw: object) -> dict:
             raw.get("enable_coordinator_mode", False), "enable_coordinator_mode"
         ),
         "sandbox": validate_sandbox(raw.get("sandbox")),
+        "memory": validate_memory(raw.get("memory")),
     }

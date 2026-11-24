@@ -1,22 +1,22 @@
-
 """后台记忆整理（autoDream）。
 
 满足时间门（≥24h）和会话门（≥5 sessions）后自动 fork 子 Agent，
 扫描现有记忆，合并重复、删除过时、修正矛盾、维护索引。
 空闲时自动整合碎片记忆，减少冗余，保持记忆库精简可靠。
 """
+
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-import signal
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from lumecode.memory.auto_memory import ENTRYPOINT_NAME, MAX_ENTRYPOINT_LINES
 from lumecode.memory.session import SessionManager
+from lumecode.tasks import spawn_background
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,7 @@ class MemoryConsolidator:
         client: Any,
         conversation: Any,
         protocol: str,
+        telemetry: Any | None = None,
     ) -> None:
         """检查门控条件，满足则后台执行一次整理。"""
         if not os.path.isdir(self._mem_dir):
@@ -82,9 +83,16 @@ class MemoryConsolidator:
             len(session_ids),
         )
 
+        # dream 会以 BYPASS 权限改写/删除记忆，跑之前先留一份整目录快照，
+        # 出问题时可回溯（.history/dream/<时间戳>/）。
+        from lumecode.memory.history import snapshot_tree
+
+        snapshot_tree(self._mem_dir)
+        snapshot_tree(self._user_mem_dir)
+
         # 后台执行
-        asyncio.ensure_future(
-            self._run(client, conversation, protocol, session_ids, prior_mtime)
+        spawn_background(
+            self._run(client, conversation, protocol, session_ids, prior_mtime, telemetry)
         )
 
     async def _run(
@@ -94,11 +102,10 @@ class MemoryConsolidator:
         protocol: str,
         session_ids: list[str],
         prior_mtime: int,
+        telemetry: Any | None = None,
     ) -> None:
         try:
-            await self._do_consolidation(
-                client, conversation, protocol, session_ids
-            )
+            await self._do_consolidation(client, conversation, protocol, session_ids, telemetry)
         except Exception:
             logger.debug("[consolidation] failed, rolling back lock")
             _rollback_lock(self._mem_dir, prior_mtime)
@@ -109,17 +116,22 @@ class MemoryConsolidator:
         conversation: Any,
         protocol: str,
         session_ids: list[str],
+        telemetry: Any | None = None,
     ) -> None:
         from lumecode.agent import Agent
         from lumecode.conversation import ConversationManager
         from lumecode.permissions.checker import PermissionChecker
+        from lumecode.permissions.dangerous import DangerousCommandDetector
+        from lumecode.permissions.modes import PermissionMode
+        from lumecode.permissions.rules import RuleEngine
+        from lumecode.permissions.sandbox import PathSandbox
         from lumecode.tools import ToolRegistry
-        from lumecode.tools.bash import BashTool
-        from lumecode.tools.edit_file import EditFileTool
-        from lumecode.tools.glob import GlobTool
-        from lumecode.tools.grep import GrepTool
-        from lumecode.tools.read_file import ReadFileTool
-        from lumecode.tools.write_file import WriteFileTool
+        from lumecode.tools.bash import Bash
+        from lumecode.tools.edit_file import EditFile
+        from lumecode.tools.glob import Glob
+        from lumecode.tools.grep import Grep
+        from lumecode.tools.read_file import ReadFile
+        from lumecode.tools.write_file import WriteFile
 
         transcript_dir = os.path.join(self._work_dir, ".lumecode", "sessions")
         prompt = _build_consolidation_prompt(
@@ -128,10 +140,16 @@ class MemoryConsolidator:
 
         # 构建子 Agent 的工具注册表
         registry = ToolRegistry()
-        for tool_cls in [ReadFileTool, WriteFileTool, EditFileTool, GlobTool, GrepTool, BashTool]:
+        for tool_cls in [ReadFile, WriteFile, EditFile, Glob, Grep, Bash]:
             registry.register(tool_cls())
 
-        checker = PermissionChecker(self._work_dir, mode="bypass")
+        # BYPASS：整理过程需要写入/重写记忆文件，不弹权限询问。
+        checker = PermissionChecker(
+            detector=DangerousCommandDetector(),
+            sandbox=PathSandbox(self._work_dir),
+            rule_engine=RuleEngine(),
+            mode=PermissionMode.BYPASS,
+        )
 
         conv = ConversationManager()
         conv.add_user_message(prompt)
@@ -139,14 +157,42 @@ class MemoryConsolidator:
         sub_agent = Agent(
             client=client,
             registry=registry,
-            checker=checker,
-            work_dir=self._work_dir,
             protocol=protocol,
+            work_dir=self._work_dir,
             max_iterations=15,
+            permission_checker=checker,
+            telemetry=telemetry,
         )
+        if telemetry is not None:
+            from lumecode.telemetry import SpanKind
 
-        async for _event in sub_agent.run(conv):
-            pass  # drain
+            consolidation_span = telemetry.start_span(
+                SpanKind.MEMORY_CONSOLIDATION,
+                "memory-consolidation",
+                attributes={"memory.sessions": len(session_ids)},
+                input=prompt,
+                set_current=False,
+            )
+            # 子 Agent 的 span 挂到 consolidation 下，而不是主对话的 run span。
+            sub_agent._run_span = consolidation_span
+        else:
+            consolidation_span = None
+
+        try:
+            async for _event in sub_agent.run(conv):
+                pass  # drain
+        except BaseException as e:
+            if consolidation_span is not None:
+                consolidation_span.end(status="error", error=str(e))
+            raise
+        finally:
+            if consolidation_span is not None:
+                consolidation_span.end(
+                    attributes={
+                        "memory.input_tokens": sub_agent.total_input_tokens,
+                        "memory.output_tokens": sub_agent.total_output_tokens,
+                    }
+                )
 
         logger.debug("[consolidation] completed")
 
@@ -183,9 +229,13 @@ def _try_acquire_lock(mem_dir: str) -> int | None:
         except (ValueError, OSError):
             pass
 
-    if mtime_ms is not None and time.time() * 1000 - mtime_ms < HOLDER_STALE_MS:
-        if holder_pid is not None and _is_process_running(holder_pid):
-            return None
+    if (
+        mtime_ms is not None
+        and time.time() * 1000 - mtime_ms < HOLDER_STALE_MS
+        and holder_pid is not None
+        and _is_process_running(holder_pid)
+    ):
+        return None
 
     os.makedirs(mem_dir, exist_ok=True)
     Path(path).write_text(str(os.getpid()))
@@ -232,12 +282,8 @@ def _is_process_running(pid: int) -> bool:
 def _list_sessions_since(work_dir: str, since_ms: int) -> list[str]:
     """返回 since_ms 之后被修改过的会话 ID。"""
     mgr = SessionManager(work_dir)
-    since_ts = since_ms / 1000
-    return [
-        s.id
-        for s in mgr.list()
-        if s.last_active > since_ts
-    ]
+    since_dt = datetime.fromtimestamp(since_ms / 1000, tz=UTC)
+    return [meta.id for meta in mgr.list() if meta.last_active > since_dt]
 
 
 # ---------------------------------------------------------------------------
@@ -254,9 +300,11 @@ def _build_consolidation_prompt(
     lines = [
         "# Dream: Memory Consolidation",
         "",
-        "You are performing a dream — a reflective pass over your memory files. "
-        "Synthesize what you've learned recently into durable, well-organized "
-        "memories so that future sessions can orient quickly.",
+        (
+            "You are performing a dream — a reflective pass over your memory files. "
+            "Synthesize what you've learned recently into durable, well-organized "
+            "memories so that future sessions can orient quickly."
+        ),
         "",
         f"Project memory directory: `{mem_dir}`",
         f"User memory directory: `{user_mem_dir}`",
@@ -283,20 +331,31 @@ def _build_consolidation_prompt(
         "",
         "## Phase 3 — Consolidate",
         "",
-        "For each thing worth remembering, write or update a memory file. "
-        "Each memory file uses YAML frontmatter with name, description, and metadata.type fields, "
-        "followed by a Markdown body.",
+        (
+            "For each thing worth remembering, write or update a memory file. "
+            "Each memory file uses YAML frontmatter with name, description, "
+            "observed_at, source, and metadata.type fields, followed by a Markdown body."
+        ),
         "",
         "Focus on:",
         "- Merging new signal into existing topic files rather than creating near-duplicates",
         '- Converting relative dates ("yesterday", "last week") to absolute dates',
         "- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source",
         "",
+        (
+            "When merging or rewriting a file, **preserve `observed_at` and `source`** from the "
+            "original fact — they record when the fact was observed, not when the file was last "
+            "edited. Only set `observed_at` to today when you add a genuinely new observation. "
+            "If a file has no `observed_at`, add one using its best-known date."
+        ),
+        "",
         "## Phase 4 — Prune and index",
         "",
-        f"Update `{ENTRYPOINT_NAME}` so it stays under {MAX_ENTRYPOINT_LINES} lines AND under ~25KB. "
-        "It's an **index**, not a dump — each entry should be one line under ~150 characters: "
-        "`- [Title](file.md) — one-line hook`. Never write memory content directly into it.",
+        (
+            f"Update `{ENTRYPOINT_NAME}` so it stays under {MAX_ENTRYPOINT_LINES} lines AND under ~25KB. "
+            "It's an **index**, not a dump — each entry should be one line under ~150 characters: "
+            "`- [Title](file.md) — one-line hook`. Never write memory content directly into it."
+        ),
         "",
         "- Remove pointers to memories that are now stale, wrong, or superseded",
         "- Demote verbose entries: if an index line is over ~200 chars, shorten the line, move the detail",
@@ -305,9 +364,11 @@ def _build_consolidation_prompt(
         "",
         "---",
         "",
-        "**Tool constraints for this run:** Bash is restricted to read-only commands "
-        "(`ls`, `find`, `grep`, `cat`, `stat`, `wc`, `head`, `tail`, and similar). "
-        "Anything that writes, redirects to a file, or modifies state will be denied.",
+        (
+            "**Tool constraints for this run:** Bash is restricted to read-only commands "
+            "(`ls`, `find`, `grep`, `cat`, `stat`, `wc`, `head`, `tail`, and similar). "
+            "Anything that writes, redirects to a file, or modifies state will be denied."
+        ),
         "",
     ]
 
@@ -316,10 +377,14 @@ def _build_consolidation_prompt(
         for sid in session_ids:
             lines.append(f"- {sid}")
 
-    lines.extend([
-        "",
-        "Return a brief summary of what you consolidated, updated, or pruned. "
-        "If nothing changed (memories are already tight), say so.",
-    ])
+    lines.extend(
+        [
+            "",
+            (
+                "Return a brief summary of what you consolidated, updated, or pruned. "
+                "If nothing changed (memories are already tight), say so."
+            ),
+        ]
+    )
 
     return "\n".join(lines)

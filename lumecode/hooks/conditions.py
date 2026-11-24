@@ -15,7 +15,6 @@ class Condition:
     operator: str
     value: str
 
-
     def evaluate(self, ctx: HookContext) -> bool:
         field_value = ctx.get_field(self.field)
         if self.operator == "==":
@@ -40,7 +39,6 @@ class ConditionGroup:
     conditions: list[Condition] = field(default_factory=list)
     logic: str = "and"
 
-
     def evaluate(self, ctx: HookContext) -> bool:
         if not self.conditions:
             return True
@@ -63,7 +61,7 @@ def _parse_single(expr: str) -> Condition:
         if idx == -1:
             continue
         field_part = expr[:idx].strip()
-        value_part = expr[idx + len(op):].strip()
+        value_part = expr[idx + len(op) :].strip()
         if value_part.startswith('"') and value_part.endswith('"'):
             value_part = value_part[1:-1]
         return Condition(field=field_part, operator=op, value=value_part)

@@ -1,20 +1,14 @@
-﻿
 """MCP 客户端系统的测试（第 6 章）。"""
+
 from __future__ import annotations
 
-import asyncio
-import os
 import textwrap
-import tempfile
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import yaml
 
 from lumecode.config import (
-    AppConfig,
     ConfigError,
     MCPServerConfig,
     build_child_env,
@@ -26,8 +20,8 @@ from lumecode.config import (
 # resolve_env_vars
 # ===========================================================================
 
-class TestResolveEnvVars:
 
+class TestResolveEnvVars:
     def test_substitutes_existing_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MY_TOKEN", "secret123")
         assert resolve_env_vars("${MY_TOKEN}") == "secret123"
@@ -49,9 +43,11 @@ class TestResolveEnvVars:
         monkeypatch.delenv("NOPE", raising=False)
         assert resolve_env_vars("${EXISTS}/${NOPE}") == "yes/${NOPE}"
 
+
 # ===========================================================================
 # build_child_env
 # ===========================================================================
+
 
 class TestBuildChildEnv:
     def test_includes_path(self) -> None:
@@ -75,9 +71,11 @@ class TestBuildChildEnv:
         assert "PATH" in env
         assert len(env) == 1
 
+
 # ===========================================================================
 # load_config：解析 mcp_servers
 # ===========================================================================
+
 
 class TestLoadConfigMCP:
     def _write_config(self, tmp_path: Path, content: str) -> Path:
@@ -86,18 +84,23 @@ class TestLoadConfigMCP:
         return p
 
     def test_no_mcp_servers(self, tmp_path: Path) -> None:
-        path = self._write_config(tmp_path, """\
+        path = self._write_config(
+            tmp_path,
+            """\
             providers:
               - name: test
                 protocol: openai
                 base_url: http://localhost
                 model: gpt-4o
-        """)
+        """,
+        )
         config = load_config(path)
         assert config.mcp_servers == []
 
     def test_stdio_server(self, tmp_path: Path) -> None:
-        path = self._write_config(tmp_path, """\
+        path = self._write_config(
+            tmp_path,
+            """\
             providers:
               - name: test
                 protocol: openai
@@ -109,7 +112,8 @@ class TestLoadConfigMCP:
                 args: ["-y", "@modelcontextprotocol/server-github"]
                 env:
                   GITHUB_TOKEN: "${GITHUB_TOKEN}"
-        """)
+        """,
+        )
         config = load_config(path)
         assert len(config.mcp_servers) == 1
         srv = config.mcp_servers[0]
@@ -119,7 +123,9 @@ class TestLoadConfigMCP:
         assert srv.args == ["-y", "@modelcontextprotocol/server-github"]
 
     def test_http_server(self, tmp_path: Path) -> None:
-        path = self._write_config(tmp_path, """\
+        path = self._write_config(
+            tmp_path,
+            """\
             providers:
               - name: test
                 protocol: openai
@@ -130,7 +136,8 @@ class TestLoadConfigMCP:
                 url: "https://api.example.com/mcp"
                 headers:
                   Authorization: "Bearer ${TOKEN}"
-        """)
+        """,
+        )
         config = load_config(path)
         srv = config.mcp_servers[0]
         assert srv.name == "remote"
@@ -138,7 +145,9 @@ class TestLoadConfigMCP:
         assert srv.is_stdio is False
 
     def test_both_command_and_url_errors(self, tmp_path: Path) -> None:
-        path = self._write_config(tmp_path, """\
+        path = self._write_config(
+            tmp_path,
+            """\
             providers:
               - name: test
                 protocol: openai
@@ -148,12 +157,15 @@ class TestLoadConfigMCP:
               - name: bad
                 command: npx
                 url: "https://example.com"
-        """)
+        """,
+        )
         with pytest.raises(ConfigError, match="cannot have both"):
             load_config(path)
 
     def test_neither_command_nor_url_errors(self, tmp_path: Path) -> None:
-        path = self._write_config(tmp_path, """\
+        path = self._write_config(
+            tmp_path,
+            """\
             providers:
               - name: test
                 protocol: openai
@@ -163,19 +175,23 @@ class TestLoadConfigMCP:
               - name: bad
                 env:
                   FOO: bar
-        """)
+        """,
+        )
         with pytest.raises(ConfigError, match="must have either"):
             load_config(path)
+
 
 # ===========================================================================
 # MCPToolWrapper
 # ===========================================================================
 
+
 class TestMCPToolWrapper:
     def test_name_format(self) -> None:
         from mcp import types as mcp_types
-        from lumecode.mcp.tool_wrapper import MCPToolWrapper
+
         from lumecode.mcp.client import MCPClient
+        from lumecode.mcp.tool_wrapper import MCPToolWrapper
 
         tool_def = mcp_types.Tool(
             name="search_issues",
@@ -192,12 +208,13 @@ class TestMCPToolWrapper:
         mock_client = MagicMock(spec=MCPClient)
         wrapper = MCPToolWrapper("github", tool_def, mock_client)
 
-        assert wrapper.name == "mcp_github_search_issues"
+        assert wrapper.name == "mcp__github__search_issues"
         assert wrapper.category == "command"
         assert wrapper.description == "Search GitHub issues"
 
     def test_get_schema_uses_original_input_schema(self) -> None:
         from mcp import types as mcp_types
+
         from lumecode.mcp.tool_wrapper import MCPToolWrapper
 
         input_schema = {
@@ -214,16 +231,19 @@ class TestMCPToolWrapper:
         wrapper = MCPToolWrapper("srv", tool_def, mock_client)
 
         schema = wrapper.get_schema()
-        assert schema["name"] == "mcp_srv_search"
+        assert schema["name"] == "mcp__srv__search"
         assert schema["input_schema"] == input_schema
+
 
 # ===========================================================================
 # _extract_text
 # ===========================================================================
 
+
 class TestExtractText:
     def test_text_content(self) -> None:
         from mcp import types as mcp_types
+
         from lumecode.mcp.tool_wrapper import _extract_text
 
         content = [
@@ -239,14 +259,17 @@ class TestExtractText:
 
     def test_image_content(self) -> None:
         from mcp import types as mcp_types
+
         from lumecode.mcp.tool_wrapper import _extract_text
 
         content = [mcp_types.ImageContent(type="image", data="...", mimeType="image/png")]
         assert "[image: image/png]" in _extract_text(content)
 
+
 # ===========================================================================
 # MCPManager：部分失败容错
 # ===========================================================================
+
 
 class TestMCPManagerPartialFailure:
     @pytest.mark.asyncio
@@ -274,6 +297,7 @@ class TestMCPManagerPartialFailure:
             good_instance.is_alive = True
 
             from mcp import types as mcp_types
+
             good_instance.list_tools.return_value = [
                 mcp_types.Tool(
                     name="test_tool",
@@ -296,4 +320,4 @@ class TestMCPManagerPartialFailure:
 
         assert len(result.errors) == 1
         assert "bad" in result.errors[0]
-        assert registry.get("mcp_good_test_tool") is not None
+        assert registry.get("mcp__good__test_tool") is not None

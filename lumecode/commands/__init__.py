@@ -1,5 +1,3 @@
-
-
 from lumecode.commands.loader import load_user_commands
 from lumecode.commands.parser import complete, parse_command
 from lumecode.commands.registry import (
@@ -10,7 +8,6 @@ from lumecode.commands.registry import (
     CommandType,
     UIController,
 )
-
 
 __all__ = [
     "Command",
@@ -23,4 +20,3 @@ __all__ = [
     "load_user_commands",
     "parse_command",
 ]
-

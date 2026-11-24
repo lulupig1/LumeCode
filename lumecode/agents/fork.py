@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import copy
@@ -28,16 +27,12 @@ def build_forked_messages(
 ) -> ConversationManager:
     for msg in conversation.history:
         if FORK_BOILERPLATE_TAG in msg.content:
-            raise ForkError(
-                "Cannot fork from a forked agent. "
-                "Fork nesting is not allowed."
-            )
+            raise ForkError("Cannot fork from a forked agent. Fork nesting is not allowed.")
 
     fork_conv = ConversationManager()
     fork_conv.history = copy.deepcopy(conversation.history)
     fork_conv.env_injected = conversation.env_injected
     fork_conv.ltm_injected = conversation.ltm_injected
-
 
     if fork_conv.history:
         last = fork_conv.history[-1]
@@ -46,15 +41,9 @@ def build_forked_messages(
             if len(fork_conv.history) >= 2:
                 candidate = fork_conv.history[-1]
                 if candidate.tool_results:
-                    existing_result_ids = {
-                        tr.tool_use_id for tr in candidate.tool_results
-                    }
+                    existing_result_ids = {tr.tool_use_id for tr in candidate.tool_results}
 
-            pending = [
-                tu
-                for tu in last.tool_uses
-                if tu.tool_use_id not in existing_result_ids
-            ]
+            pending = [tu for tu in last.tool_uses if tu.tool_use_id not in existing_result_ids]
             if pending:
                 placeholders = [
                     ToolResultBlock(
@@ -74,4 +63,3 @@ def build_forked_messages(
 
     fork_conv.add_user_message(f"{FORK_BOILERPLATE}\n\nYour task:\n{task}")
     return fork_conv
-

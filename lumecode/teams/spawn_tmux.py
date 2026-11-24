@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import subprocess
 from dataclasses import dataclass
@@ -92,7 +93,5 @@ def send_keys_to_pane(pane_id: str, keys: str = "") -> None:
 
 
 def kill_pane(pane_id: str) -> None:
-    try:
+    with contextlib.suppress(TmuxSpawnError):
         _run_tmux("kill-pane", "-t", pane_id)
-    except TmuxSpawnError:
-        pass

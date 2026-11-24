@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -31,13 +30,12 @@ class TaskUpdateTool(Tool):
     )
     params_model = TaskUpdateParams
     category = "command"
-    is_concurrency_safe = True
-
+    # 会写共享任务板（SharedTaskStore 无锁），必须独占执行。
+    is_concurrency_safe = False
 
     def __init__(self, team_manager: TeamManager, team_name: str) -> None:
         self._team_manager = team_manager
         self._team_name = team_name
-
 
     async def execute(self, params: BaseModel) -> ToolResult:
         p: TaskUpdateParams = params  # type: ignore[assignment]
@@ -50,7 +48,9 @@ class TaskUpdateTool(Tool):
 
         store = self._team_manager.get_task_store(self._team_name)
         if store is None:
-            return ToolResult(output=f"Task store not found for team '{self._team_name}'", is_error=True)
+            return ToolResult(
+                output=f"Task store not found for team '{self._team_name}'", is_error=True
+            )
 
         task = store.update(
             task_id=p.task_id,

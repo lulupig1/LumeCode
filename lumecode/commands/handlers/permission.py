@@ -1,9 +1,7 @@
-
 from __future__ import annotations
 
 from lumecode.commands.registry import Command, CommandContext, CommandType
 from lumecode.permissions import PermissionMode
-
 
 _MODE_NAMES = {m.value: m for m in PermissionMode}
 
@@ -23,11 +21,7 @@ async def handle_permission(ctx: CommandContext) -> None:
         if checker and checker.rule_engine:
             tiers = checker.rule_engine._load_tiers()
             rule_count = sum(len(t) for t in tiers)
-        ctx.ui.add_system_message(
-            f"权限状态\n"
-            f"  当前模式: {mode.value}\n"
-            f"  规则数量: {rule_count}"
-        )
+        ctx.ui.add_system_message(f"权限状态\n  当前模式: {mode.value}\n  规则数量: {rule_count}")
 
     elif sub == "mode":
         mode_str = parts[1].strip() if len(parts) > 1 else ""
@@ -52,7 +46,7 @@ async def handle_permission(ctx: CommandContext) -> None:
         tiers = checker.rule_engine._load_tiers()
         names = ["用户级", "项目级", "本地级"]
         lines: list[str] = ["权限规则："]
-        for name, rules in zip(names, tiers):
+        for name, rules in zip(names, tiers, strict=False):
             if rules:
                 lines.append(f"  [{name}]")
                 for r in rules:
@@ -66,7 +60,8 @@ async def handle_permission(ctx: CommandContext) -> None:
         if not rule_str:
             ctx.ui.add_system_message("用法: /permission add <规则> <效果>")
             return
-        from lumecode.permissions.rules import Rule, parse_rule
+        from lumecode.permissions.rules import Effect, parse_rule
+
         rule_parts = rule_str.rsplit(None, 1)
         if len(rule_parts) < 2 or rule_parts[1] not in ("allow", "deny"):
             ctx.ui.add_system_message(
@@ -75,17 +70,19 @@ async def handle_permission(ctx: CommandContext) -> None:
             )
             return
         try:
-            rule = parse_rule(rule_parts[0], rule_parts[1])
+            effect: Effect = "allow" if rule_parts[1] == "allow" else "deny"
+            rule = parse_rule(rule_parts[0], effect)
         except ValueError as e:
             ctx.ui.add_system_message(str(e))
             return
         checker = ctx.agent.permission_checker
         if checker and checker.rule_engine:
             checker.rule_engine.append_local_rule(rule)
-            ctx.ui.add_system_message(f"规则已添加: {rule.tool_name}({rule.pattern}) → {rule.effect}")
+            ctx.ui.add_system_message(
+                f"规则已添加: {rule.tool_name}({rule.pattern}) → {rule.effect}"
+            )
         else:
             ctx.ui.add_system_message("规则引擎未初始化")
-
 
     elif sub == "reset":
         checker = ctx.agent.permission_checker
@@ -110,4 +107,3 @@ PERMISSION_COMMAND = Command(
     type=CommandType.LOCAL,
     handler=handle_permission,
 )
-

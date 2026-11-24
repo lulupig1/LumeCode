@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -24,4 +23,3 @@ class WorktreeSession:
     original_head_commit: str
     session_id: str = ""
     hook_based: bool = False
-

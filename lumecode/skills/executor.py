@@ -7,7 +7,7 @@ from lumecode.conversation import ConversationManager, Message
 from lumecode.skills.parser import SkillDef, substitute_arguments
 
 if TYPE_CHECKING:
-    from lumecode.agent import Agent, AgentEvent
+    from lumecode.agent import Agent
     from lumecode.client import LLMClient
 
 log = logging.getLogger(__name__)
@@ -16,8 +16,6 @@ FORK_RECENT_COUNT = 5
 
 
 class SkillExecutor:
-
-
     def __init__(
         self,
         agent: Agent,
@@ -28,22 +26,16 @@ class SkillExecutor:
         self.client = client
         self.protocol = protocol
 
-
     def execute_inline(self, skill: SkillDef, args: str) -> None:
         prompt = substitute_arguments(skill.prompt_body, args)
         self.agent.activate_skill(skill.name, prompt)
         if getattr(self.agent, "recovery_state", None) is not None:
             self.agent.recovery_state.record_skill_invocation(skill.name, prompt)
 
-
-    async def execute_fork(
-        self, skill: SkillDef, args: str
-    ) -> str:
+    async def execute_fork(self, skill: SkillDef, args: str) -> str:
         prompt = substitute_arguments(skill.prompt_body, args)
         if getattr(self.agent, "recovery_state", None) is not None:
-            self.agent.recovery_state.record_skill_invocation(
-                skill.name, skill.prompt_body
-            )
+            self.agent.recovery_state.record_skill_invocation(skill.name, skill.prompt_body)
 
         fork_conv = ConversationManager()
 
@@ -56,7 +48,8 @@ class SkillExecutor:
 
         fork_conv.add_user_message(prompt)
 
-        from lumecode.agent import Agent as AgentClass, StreamText, LoopComplete, ErrorEvent
+        from lumecode.agent import Agent as AgentClass
+        from lumecode.agent import ErrorEvent, LoopComplete, StreamText
 
         fork_agent = AgentClass(
             client=self.client,
@@ -66,7 +59,9 @@ class SkillExecutor:
             max_iterations=self.agent.max_iterations,
             permission_checker=None,
             context_window=self.agent.context_window,
+            telemetry=self.agent.telemetry,
         )
+        fork_agent._run_span = self.agent._run_span
 
         result_parts: list[str] = []
         async for event in fork_agent.run(fork_conv):
@@ -79,29 +74,22 @@ class SkillExecutor:
 
         return "".join(result_parts)
 
-
     def _build_fork_context(self, mode: str) -> list[Message]:
         if mode == "none":
             return []
 
-        history = self.agent._conversation.history if hasattr(self.agent, '_conversation') else []
-        if not history:
-            main_history = []
-        else:
-            main_history = history
+        # 注意：Agent 把运行中的对话存为 _current_conversation（不是 _conversation）。
+        # 之前这里读错属性名导致 hasattr 恒为 False，fork 型 skill 的
+        # context: full/recent 静默失效、永远拿到空上下文。
+        conversation = getattr(self.agent, "current_conversation", None)
+        main_history = conversation.history if conversation is not None else []
 
         if mode == "recent":
-            content_messages = [
-                m for m in main_history
-                if m.content and not m.tool_results
-            ]
+            content_messages = [m for m in main_history if m.content and not m.tool_results]
             return content_messages[-FORK_RECENT_COUNT:]
 
         if mode == "full":
-            content_messages = [
-                m for m in main_history
-                if m.content and not m.tool_results
-            ]
+            content_messages = [m for m in main_history if m.content and not m.tool_results]
             if not content_messages:
                 return []
             summary_parts = []

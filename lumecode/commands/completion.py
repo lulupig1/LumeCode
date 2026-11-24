@@ -5,7 +5,6 @@ from textual.widgets import Static
 
 
 class CompletionPopup(Static):
-
     DEFAULT_CSS = """
     CompletionPopup {
         height: auto;

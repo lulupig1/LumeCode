@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -41,7 +41,7 @@ def parse_frontmatter(raw: str) -> tuple[dict, str]:
         raise SkillParseError("Unclosed YAML frontmatter (missing closing ---)")
 
     yaml_block = stripped[3:end]
-    body = stripped[end + 3:].lstrip("\n")
+    body = stripped[end + 3 :].lstrip("\n")
 
     try:
         meta = yaml.safe_load(yaml_block)

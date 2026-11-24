@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 from textual.app import ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Vertical
 from textual.message import Message
 from textual.widgets import Static
@@ -14,13 +16,13 @@ class InlineAskUserWidget(Vertical, can_focus=True):
     多选（MultiSelect）切换、"Other" 自定义输入，以及复核/提交视图。
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("up", "cursor_up", "Up", priority=True),
         Binding("down", "cursor_down", "Down", priority=True),
         Binding("enter", "select", "Select", priority=True),
         Binding("tab", "next_q", "Next", priority=True),
         Binding("shift+tab", "prev_q", "Prev", priority=True),
-        Binding("space", "toggle", "Toggle", priority=True),
+        Binding("space", "toggle_option", "Toggle", priority=True),
         Binding("escape", "cancel", "Cancel", priority=True),
     ]
 
@@ -28,7 +30,6 @@ class InlineAskUserWidget(Vertical, can_focus=True):
         def __init__(self, answers: dict[str, str] | None) -> None:
             super().__init__()
             self.answers = answers
-
 
     def __init__(self, questions: list[dict], **kwargs) -> None:
         super().__init__(id="askuser-inline", **kwargs)
@@ -41,7 +42,6 @@ class InlineAskUserWidget(Vertical, can_focus=True):
         self._answered: dict[int, str] = {}
         self._on_submit = False
         self._submit_idx = 0
-
 
     def compose(self) -> ComposeResult:
         yield Static(self._build_content(), id="askuser-content")
@@ -112,7 +112,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
     def _render_nav_bar(self) -> str:
         parts = []
         for i, q in enumerate(self._questions):
-            header = q.get("header", f"Q{i+1}")
+            header = q.get("header", f"Q{i + 1}")
             check = "☑" if i in self._answered else "☐"
             if i == self._q_idx and not self._on_submit:
                 parts.append(f"[bold reverse] {header} {check} [/]")
@@ -127,7 +127,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
     def _render_submit(self) -> str:
         lines = ["\n [bold color(99)]Review your answers:[/]\n"]
         for i, q in enumerate(self._questions):
-            header = q.get("header", q.get("question", f"Q{i+1}"))
+            header = q.get("header", q.get("question", f"Q{i + 1}"))
             ans = self._answered.get(i, "")
             if ans:
                 lines.append(f"   {header}: {ans}")
@@ -164,7 +164,9 @@ class InlineAskUserWidget(Vertical, can_focus=True):
             self._answered[self._q_idx] = ", ".join(selected)
         else:
             opt = options[cursor]
-            self._answered[self._q_idx] = opt.get("label", str(opt)) if isinstance(opt, dict) else str(opt)
+            self._answered[self._q_idx] = (
+                opt.get("label", str(opt)) if isinstance(opt, dict) else str(opt)
+            )
 
     def action_cursor_up(self) -> None:
         if self._on_submit:
@@ -206,8 +208,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
             self._q_idx -= 1
             self._refresh()
 
-
-    def action_toggle(self) -> None:
+    def action_toggle_option(self) -> None:
         if self._on_submit:
             return
         q = self._questions[self._q_idx]
@@ -244,7 +245,6 @@ class InlineAskUserWidget(Vertical, can_focus=True):
                 self._on_submit = True
                 self._submit_idx = 0
                 self._refresh()
-
 
     def action_cancel(self) -> None:
         self.post_message(self.Responded(None))

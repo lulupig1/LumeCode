@@ -1,8 +1,6 @@
-
 from __future__ import annotations
 
 from lumecode.commands.registry import Command, CommandContext, CommandType
-
 
 REVIEW_PROMPT = (
     "请审查当前 git diff 中的代码变更。重点关注：\n"
@@ -27,4 +25,3 @@ REVIEW_COMMAND = Command(
     type=CommandType.PROMPT,
     handler=handle_review,
 )
-

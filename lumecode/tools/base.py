@@ -32,7 +32,6 @@ class Tool(ABC):
     def is_read_only(self) -> bool:
         return self.category == "read"
 
-
     def get_schema(self) -> dict[str, Any]:
         schema = self.params_model.model_json_schema()
         schema.pop("title", None)
@@ -43,7 +42,14 @@ class Tool(ABC):
         }
 
     @abstractmethod
-    async def execute(self, params: BaseModel) -> ToolResult: ...
+    async def execute(self, params: Any) -> ToolResult:
+        """执行工具。
+
+        基类参数放宽为 ``Any``：注册表里混放各类工具，调用方经由基类类型
+        调用 ``execute``；每个子类用注释/签名收窄为自己的 ``Params`` 模型。
+        若基类固定为 ``BaseModel``，子类收窄参数会违反 LSP 而被 mypy 拒绝。
+        """
+        ...
 
 
 # --- 流式事件 ---
@@ -98,4 +104,12 @@ class StreamEnd:
     cache_creation: int = 0
 
 
-StreamEvent = TextDelta | ThinkingDelta | ThinkingComplete | ToolCallStart | ToolCallDelta | ToolCallComplete | StreamEnd
+StreamEvent = (
+    TextDelta
+    | ThinkingDelta
+    | ThinkingComplete
+    | ToolCallStart
+    | ToolCallDelta
+    | ToolCallComplete
+    | StreamEnd
+)

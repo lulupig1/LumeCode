@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from lumecode.tools.base import Tool, ToolResult
 from lumecode.tools.diff import build_diff
+from lumecode.tools.file_io import BinaryFileError, read_text_file, write_text_file
 
 if TYPE_CHECKING:
     from lumecode.cache import FileCache
@@ -16,7 +16,9 @@ if TYPE_CHECKING:
 
 class Params(BaseModel):
     file_path: str = Field(description="Path to the file to edit")
-    old_string: str = Field(description="The exact string to find and replace (must be unique in file)")
+    old_string: str = Field(
+        description="The exact string to find and replace (must be unique in file)"
+    )
     new_string: str = Field(description="The replacement string")
 
 
@@ -29,12 +31,15 @@ class EditFile(Tool):
     params_model = Params
     category = "write"
 
-
-    def __init__(self, file_cache: FileCache | None = None, file_history: Any = None, file_state_cache: FileStateCache | None = None) -> None:
+    def __init__(
+        self,
+        file_cache: FileCache | None = None,
+        file_history: Any = None,
+        file_state_cache: FileStateCache | None = None,
+    ) -> None:
         self._cache = file_cache
         self.file_history = file_history
         self._state_cache = file_state_cache
-
 
     async def execute(self, params: Params) -> ToolResult:
         if self.file_history is not None:
@@ -51,8 +56,14 @@ class EditFile(Tool):
                 return ToolResult(output=err_msg, is_error=True)
 
         try:
-            content = path.read_text(encoding="utf-8")
-        except Exception as e:
+            content, newline, _ = read_text_file(path, max_bytes=None)
+        except BinaryFileError as e:
+            return ToolResult(output=f"Error: {e}", is_error=True)
+        except UnicodeDecodeError:
+            return ToolResult(
+                output=f"Error: {params.file_path} is not valid UTF-8 text.", is_error=True
+            )
+        except OSError as e:
             return ToolResult(output=f"Error reading file: {e}", is_error=True)
 
         count = content.count(params.old_string)
@@ -66,7 +77,7 @@ class EditFile(Tool):
 
         new_content = content.replace(params.old_string, params.new_string, 1)
         try:
-            path.write_text(new_content, encoding="utf-8")
+            write_text_file(path, new_content, newline)
             if self._cache:
                 self._cache.invalidate(str(path.resolve()))
             if self._state_cache:

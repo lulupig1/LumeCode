@@ -10,6 +10,7 @@ from lumecode.tools.base import Tool, ToolResult
 if TYPE_CHECKING:
     from lumecode.agent import Agent
     from lumecode.agents.loader import AgentLoader
+    from lumecode.agents.parser import AgentDef
     from lumecode.agents.task_manager import TaskManager
     from lumecode.agents.trace import TraceManager
     from lumecode.client import LLMClient
@@ -71,7 +72,6 @@ class AgentTool(Tool):
     category = "command"
     is_concurrency_safe = False
 
-
     def __init__(
         self,
         agent_loader: AgentLoader,
@@ -108,10 +108,10 @@ class AgentTool(Tool):
         if isolation == "worktree":
             return await self._execute_with_worktree(p)
 
+        from lumecode.agent import Agent as AgentClass
         from lumecode.agents.fork import ForkError, build_forked_messages
         from lumecode.agents.parser import AgentDef
         from lumecode.agents.tool_filter import clone_registry_for_fork, resolve_agent_tools
-        from lumecode.agent import Agent as AgentClass
         from lumecode.conversation import ConversationManager
         from lumecode.permissions import (
             DangerousCommandDetector,
@@ -149,7 +149,7 @@ class AgentTool(Tool):
                     is_error=True,
                 )
             try:
-                parent_conv = getattr(self._parent_agent, '_current_conversation', None)
+                parent_conv = getattr(self._parent_agent, "_current_conversation", None)
                 if parent_conv is None:
                     return ToolResult(
                         output="Cannot fork: no active conversation in parent agent.",
@@ -180,15 +180,15 @@ class AgentTool(Tool):
             is_background = True
 
         # 构建子 agent 工具注册表
-        _base_registry = getattr(self._parent_agent, '_full_registry', None) or self._parent_agent.registry
+        _base_registry = (
+            getattr(self._parent_agent, "_full_registry", None) or self._parent_agent.registry
+        )
         if is_fork:
             # fork 继承父 Agent 的完整工具池，确保子 Agent 拥有相同的工具能力，
             # AgentTool 实例的 query_source 被标记为 fork 以拦截嵌套
             filtered_registry = clone_registry_for_fork(_base_registry)
         else:
-            filtered_registry = resolve_agent_tools(
-                _base_registry, definition, is_background
-            )
+            filtered_registry = resolve_agent_tools(_base_registry, definition, is_background)
 
         # 为子 agent 创建权限检查器
         pm_str = definition.permission_mode
@@ -215,14 +215,17 @@ class AgentTool(Tool):
             context_window=self._parent_agent.context_window,
             instructions_content=definition.system_prompt,
             hook_engine=self._parent_agent.hook_engine,
+            telemetry=self._parent_agent.telemetry,
         )
         sub_agent.parent_id = self._parent_agent.agent_id
         sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
+        sub_agent._run_span = self._parent_agent._run_span
 
         # fork 子 agent 继承父 agent 的替换状态，确保共享的 tool_use_id 做出一致的
         # 决策——这样父子共享的 prompt cache 前缀才能保持字节级一致
         if p.subagent_type is None:
             from lumecode.context import clone_replacement_state
+
             sub_agent.replacement_state = clone_replacement_state(
                 self._parent_agent.replacement_state
             )
@@ -263,9 +266,7 @@ class AgentTool(Tool):
                 result_text = await sub_agent.run_to_completion(p.prompt)
         except Exception as e:
             self._trace_manager.complete(trace_node.agent_id, "failed")
-            return ToolResult(
-                output=f"Sub-agent failed: {e}", is_error=True
-            )
+            return ToolResult(output=f"Sub-agent failed: {e}", is_error=True)
 
         self._trace_manager.update(
             trace_node.agent_id,
@@ -280,12 +281,14 @@ class AgentTool(Tool):
         if self._team_manager is None:
             return ToolResult(output="TeamManager not configured.", is_error=True)
         if self._worktree_manager is None:
-            return ToolResult(output="WorktreeManager not configured for team spawn.", is_error=True)
+            return ToolResult(
+                output="WorktreeManager not configured for team spawn.", is_error=True
+            )
 
+        from lumecode.agent import Agent as AgentClass
         from lumecode.agents.fork import ForkError, build_forked_messages
         from lumecode.agents.parser import AgentDef
         from lumecode.agents.tool_filter import build_teammate_tools
-        from lumecode.agent import Agent as AgentClass
         from lumecode.conversation import ConversationManager
         from lumecode.permissions import (
             DangerousCommandDetector,
@@ -299,7 +302,10 @@ class AgentTool(Tool):
 
         team = self._team_manager.get_team(p.team_name)
         if team is None:
-            return ToolResult(output=f"Team '{p.team_name}' not found. Create it first with TeamCreate.", is_error=True)
+            return ToolResult(
+                output=f"Team '{p.team_name}' not found. Create it first with TeamCreate.",
+                is_error=True,
+            )
 
         base_name = p.name or p.subagent_type or "worker"
         existing_names = {m.name for m in team.members}
@@ -327,9 +333,11 @@ class AgentTool(Tool):
         else:
             if self._enable_fork:
                 try:
-                    parent_conv = getattr(self._parent_agent, '_current_conversation', None)
+                    parent_conv = getattr(self._parent_agent, "_current_conversation", None)
                     if parent_conv is None:
-                        return ToolResult(output="Cannot fork: no active conversation.", is_error=True)
+                        return ToolResult(
+                            output="Cannot fork: no active conversation.", is_error=True
+                        )
                     conversation = build_forked_messages(parent_conv, p.prompt)
                     is_fork = True
                 except ForkError as e:
@@ -367,20 +375,24 @@ class AgentTool(Tool):
         )
         agent_id = trace_node.agent_id
 
-        _has_full = getattr(self._parent_agent, '_full_registry', None) is not None
-        full_registry = getattr(self._parent_agent, '_full_registry', None) or self._parent_agent.registry
+        _has_full = getattr(self._parent_agent, "_full_registry", None) is not None
+        full_registry = (
+            getattr(self._parent_agent, "_full_registry", None) or self._parent_agent.registry
+        )
         _full_tools = [t.name for t in full_registry.list_tools()]
         log.info(
             "[teammate] has_full_registry=%s full_tools=%d names=%s backend=%s def_tools=%s def_disallowed=%s",
-            _has_full, len(_full_tools), _full_tools,
+            _has_full,
+            len(_full_tools),
+            _full_tools,
             backend.value,
-            getattr(definition, 'tools', []),
-            getattr(definition, 'disallowed_tools', []),
+            getattr(definition, "tools", []),
+            getattr(definition, "disallowed_tools", []),
         )
         teammate_registry = build_teammate_tools(
             parent_registry=full_registry,
             team_manager=self._team_manager,
-            team_name=p.team_name,
+            team_name=p.team_name or "",
             agent_id=agent_id,
             agent_name=teammate_name,
             backend_type=backend.value,
@@ -409,11 +421,13 @@ class AgentTool(Tool):
             context_window=self._parent_agent.context_window,
             instructions_content=instructions,
             hook_engine=self._parent_agent.hook_engine,
+            telemetry=self._parent_agent.telemetry,
         )
         sub_agent.parent_id = self._parent_agent.agent_id
         sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
+        sub_agent._run_span = self._parent_agent._run_span
         sub_agent.agent_id = agent_id
-        sub_agent.team_name = p.team_name
+        sub_agent.team_name = p.team_name or ""
         sub_agent._team_manager = self._team_manager
 
         # 7. 注册名称和成员信息
@@ -432,9 +446,7 @@ class AgentTool(Tool):
 
         # 8. 按后端类型启动队友
         if backend in (BackendType.TMUX, BackendType.ITERM2):
-            return self._spawn_pane_teammate(
-                p, team, member, backend, wt, agent_id, teammate_name
-            )
+            return self._spawn_pane_teammate(p, team, member, backend, wt, agent_id, teammate_name)
 
         # 进程内模式：直接用 task_manager 执行并通知结果
         task_id = self._task_manager.launch(
@@ -455,10 +467,15 @@ class AgentTool(Tool):
             )
         )
 
-
     def _spawn_pane_teammate(
-        self, p: Any, team: Any, member: Any, backend: Any, wt: Any,
-        agent_id: str, teammate_name: str,
+        self,
+        p: Any,
+        team: Any,
+        member: Any,
+        backend: Any,
+        wt: Any,
+        agent_id: str,
+        teammate_name: str,
     ) -> ToolResult:
         from lumecode.teams.models import BackendType
 
@@ -468,7 +485,8 @@ class AgentTool(Tool):
         try:
             if backend == BackendType.TMUX:
                 from lumecode.teams.spawn_tmux import spawn_tmux_teammate
-                pane_info = spawn_tmux_teammate(
+
+                pane_info: Any = spawn_tmux_teammate(
                     team_name=p.team_name,
                     teammate_name=teammate_name,
                     worktree_path=wt.path,
@@ -480,6 +498,7 @@ class AgentTool(Tool):
                 self._team_manager.register_pane_id(agent_id, pane_info.pane_id)
             elif backend == BackendType.ITERM2:
                 from lumecode.teams.spawn_iterm2 import spawn_iterm2_teammate
+
                 pane_info = spawn_iterm2_teammate(
                     team_name=p.team_name,
                     teammate_name=teammate_name,
@@ -506,13 +525,11 @@ class AgentTool(Tool):
             )
         )
 
-
     def _select_llm(
         self,
         params: AgentToolParams,
         definition: AgentDef,
     ) -> LLMClient:
-        from lumecode.agents.parser import AgentDef
 
         model_override = params.model or (
             definition.model if definition.model != "inherit" else None
@@ -525,7 +542,6 @@ class AgentTool(Tool):
 
         return self._parent_agent.client
 
-
     async def _execute_with_worktree(self, p: AgentToolParams) -> ToolResult:
         if self._worktree_manager is None:
             return ToolResult(
@@ -533,10 +549,9 @@ class AgentTool(Tool):
                 is_error=True,
             )
 
+        from lumecode.agent import Agent as AgentClass
         from lumecode.agents.parser import AgentDef
         from lumecode.agents.tool_filter import resolve_agent_tools
-        from lumecode.agent import Agent as AgentClass
-        from lumecode.conversation import ConversationManager
         from lumecode.permissions import (
             DangerousCommandDetector,
             PathSandbox,
@@ -584,10 +599,10 @@ class AgentTool(Tool):
 
         client = self._select_llm(p, definition)
 
-        _base_registry = getattr(self._parent_agent, '_full_registry', None) or self._parent_agent.registry
-        filtered_registry = resolve_agent_tools(
-            _base_registry, definition, False
+        _base_registry = (
+            getattr(self._parent_agent, "_full_registry", None) or self._parent_agent.registry
         )
+        filtered_registry = resolve_agent_tools(_base_registry, definition, False)
 
         pm_str = definition.permission_mode
         pm_enum = getattr(
@@ -612,9 +627,11 @@ class AgentTool(Tool):
             context_window=self._parent_agent.context_window,
             instructions_content=definition.system_prompt,
             hook_engine=self._parent_agent.hook_engine,
+            telemetry=self._parent_agent.telemetry,
         )
         sub_agent.parent_id = self._parent_agent.agent_id
         sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
+        sub_agent._run_span = self._parent_agent._run_span
 
         trace_node = self._trace_manager.create(
             agent_type=definition.agent_type,
@@ -647,7 +664,6 @@ class AgentTool(Tool):
 
         return ToolResult(output=result_text or "(sub-agent returned no output)")
 
-
     def _create_client_for_model(self, model_alias: str) -> LLMClient | None:
         if self._provider_config is None:
             return None
@@ -672,5 +688,6 @@ class AgentTool(Tool):
         )
         try:
             return create_client(config)
-        except Exception:
+        except Exception as e:
+            log.debug("sub-agent client creation failed: %s", e)
             return None

@@ -1,10 +1,11 @@
-﻿
 """Agent Loop 的集成测试 —— 以编程方式逐项验证 checklist。"""
+
 from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 
@@ -21,9 +22,13 @@ from lumecode.agent import (
     UsageEvent,
     partition_tool_calls,
 )
-from lumecode.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
 from lumecode.client import LLMClient
 from lumecode.conversation import ConversationManager
+from lumecode.prompts import (
+    build_environment_context,
+    build_plan_mode_reminder,
+    build_system_prompt,
+)
 from lumecode.serialization import build_anthropic_messages
 from lumecode.tools import create_default_registry
 from lumecode.tools.base import (
@@ -36,6 +41,7 @@ from lumecode.tools.base import (
 # ---------------------------------------------------------------------------
 # 返回预设脚本响应的 mock LLM 客户端
 # ---------------------------------------------------------------------------
+
 
 class MockLLMClient(LLMClient):
     def __init__(self, responses: list[list[StreamEvent]], yield_control: bool = False) -> None:
@@ -60,10 +66,16 @@ class MockLLMClient(LLMClient):
                 await asyncio.sleep(0)
             yield e
 
+
 def _collect(events: list) -> dict[str, list]:
     result: dict[str, list] = {
-        "text": [], "tool_use": [], "tool_result": [],
-        "turn": [], "loop": [], "usage": [], "error": [],
+        "text": [],
+        "tool_use": [],
+        "tool_result": [],
+        "turn": [],
+        "loop": [],
+        "usage": [],
+        "error": [],
     }
     for e in events:
         if isinstance(e, StreamText):
@@ -82,26 +94,30 @@ def _collect(events: list) -> dict[str, list]:
             result["error"].append(e)
     return result
 
+
 # ---------------------------------------------------------------------------
 # 测试用例
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_single_step_tool_call():
     """Agent 调用一次 ReadFile，拿到结果后停止。"""
-    client = MockLLMClient([
-        # 第 1 轮：模型调用 ReadFile
+    client = MockLLMClient(
         [
-            TextDelta("Let me read the file."),
-            ToolCallComplete("t1", "ReadFile", {"file_path": "LUMECODE.md"}),
-            StreamEnd("end_turn", input_tokens=10, output_tokens=20),
-        ],
-        # 第 2 轮：模型给出最终答案
-        [
-            TextDelta("The file contains project info."),
-            StreamEnd("end_turn", input_tokens=30, output_tokens=15),
-        ],
-    ])
+            # 第 1 轮：模型调用 ReadFile
+            [
+                TextDelta("Let me read the file."),
+                ToolCallComplete("t1", "ReadFile", {"file_path": "LUMECODE.md"}),
+                StreamEnd("end_turn", input_tokens=10, output_tokens=20),
+            ],
+            # 第 2 轮：模型给出最终答案
+            [
+                TextDelta("The file contains project info."),
+                StreamEnd("end_turn", input_tokens=30, output_tokens=15),
+            ],
+        ]
+    )
     registry = create_default_registry()
     agent = Agent(client, registry, "anthropic", work_dir=".")
     conv = ConversationManager()
@@ -119,6 +135,7 @@ async def test_single_step_tool_call():
     assert len(c["loop"]) == 1
     assert c["loop"][0].total_turns == 2
 
+
 @pytest.mark.asyncio
 async def test_multi_step_autonomous():
     """Agent 先 WriteFile 再 ReadFile 然后停止 —— 端到端的多步流程。"""
@@ -126,25 +143,31 @@ async def test_multi_step_autonomous():
     test_file = "/tmp/LUMECODE_TEST_hello.txt"
     if os.path.exists(test_file):
         os.remove(test_file)
-    client = MockLLMClient([
-        # 第 1 轮：WriteFile
+    client = MockLLMClient(
         [
-            TextDelta("Creating file."),
-            ToolCallComplete("t1", "WriteFile", {"file_path": "/tmp/LUMECODE_TEST_hello.txt", "content": "Hello World"}),
-            StreamEnd("end_turn", input_tokens=10, output_tokens=20),
-        ],
-        # 第 2 轮：ReadFile 进行验证
-        [
-            TextDelta("Verifying content."),
-            ToolCallComplete("t2", "ReadFile", {"file_path": "/tmp/LUMECODE_TEST_hello.txt"}),
-            StreamEnd("end_turn", input_tokens=40, output_tokens=25),
-        ],
-        # 第 3 轮：最终答案
-        [
-            TextDelta("File created and verified. Content is correct."),
-            StreamEnd("end_turn", input_tokens=60, output_tokens=30),
-        ],
-    ])
+            # 第 1 轮：WriteFile
+            [
+                TextDelta("Creating file."),
+                ToolCallComplete(
+                    "t1",
+                    "WriteFile",
+                    {"file_path": "/tmp/LUMECODE_TEST_hello.txt", "content": "Hello World"},
+                ),
+                StreamEnd("end_turn", input_tokens=10, output_tokens=20),
+            ],
+            # 第 2 轮：ReadFile 进行验证
+            [
+                TextDelta("Verifying content."),
+                ToolCallComplete("t2", "ReadFile", {"file_path": "/tmp/LUMECODE_TEST_hello.txt"}),
+                StreamEnd("end_turn", input_tokens=40, output_tokens=25),
+            ],
+            # 第 3 轮：最终答案
+            [
+                TextDelta("File created and verified. Content is correct."),
+                StreamEnd("end_turn", input_tokens=60, output_tokens=30),
+            ],
+        ]
+    )
     registry = create_default_registry()
     agent = Agent(client, registry, "anthropic", work_dir="/tmp")
     conv = ConversationManager()
@@ -165,15 +188,18 @@ async def test_multi_step_autonomous():
     assert not c["tool_result"][0].is_error
     assert not c["tool_result"][1].is_error
 
+
 @pytest.mark.asyncio
 async def test_stop_end_turn():
     """模型以 end_turn 自然停止。"""
-    client = MockLLMClient([
+    client = MockLLMClient(
         [
-            TextDelta("Hello! How can I help?"),
-            StreamEnd("end_turn", input_tokens=5, output_tokens=10),
-        ],
-    ])
+            [
+                TextDelta("Hello! How can I help?"),
+                StreamEnd("end_turn", input_tokens=5, output_tokens=10),
+            ],
+        ]
+    )
     registry = create_default_registry()
     agent = Agent(client, registry, "anthropic")
     conv = ConversationManager()
@@ -188,17 +214,20 @@ async def test_stop_end_turn():
     assert c["loop"][0].total_turns == 1
     assert len(c["error"]) == 0
 
+
 @pytest.mark.asyncio
 async def test_stop_max_iterations():
     """Agent 在达到 max_iterations 后停止。"""
     # 每个响应都带有工具调用，因此循环永远不会自然结束
     responses = []
     for i in range(5):
-        responses.append([
-            TextDelta(f"Step {i}"),
-            ToolCallComplete(f"t{i}", "ReadFile", {"file_path": "LUMECODE.md"}),
-            StreamEnd("end_turn", input_tokens=10, output_tokens=10),
-        ])
+        responses.append(
+            [
+                TextDelta(f"Step {i}"),
+                ToolCallComplete(f"t{i}", "ReadFile", {"file_path": "LUMECODE.md"}),
+                StreamEnd("end_turn", input_tokens=10, output_tokens=10),
+            ]
+        )
 
     client = MockLLMClient(responses)
     registry = create_default_registry()
@@ -214,12 +243,14 @@ async def test_stop_max_iterations():
     assert len(c["error"]) == 1
     assert "maximum iterations" in c["error"][0].message
 
+
 @pytest.mark.asyncio
 async def test_stop_cancel():
     """Agent 在收到 CancelledError 时干净地停止。"""
 
     class SlowMockClient(LLMClient):
         """在事件之间 sleep 的 mock 客户端，以便留出取消的时机。"""
+
         def __init__(self) -> None:
             self._call_count = 0
 
@@ -263,16 +294,19 @@ async def test_stop_cancel():
     assert len(c["turn"]) >= 1
     assert len(c["turn"]) < 50
 
+
 @pytest.mark.asyncio
 async def test_stop_consecutive_unknown_tools():
     """Agent 在连续 3 次调用未知工具后停止。"""
     responses = []
     for i in range(5):
-        responses.append([
-            TextDelta(f"Trying tool {i}"),
-            ToolCallComplete(f"t{i}", "NonExistentTool", {"arg": "val"}),
-            StreamEnd("end_turn", input_tokens=10, output_tokens=10),
-        ])
+        responses.append(
+            [
+                TextDelta(f"Trying tool {i}"),
+                ToolCallComplete(f"t{i}", "NonExistentTool", {"arg": "val"}),
+                StreamEnd("end_turn", input_tokens=10, output_tokens=10),
+            ]
+        )
 
     client = MockLLMClient(responses)
     registry = create_default_registry()
@@ -288,23 +322,26 @@ async def test_stop_consecutive_unknown_tools():
     assert len(c["error"]) == 1
     assert "unknown tool" in c["error"][0].message
 
+
 @pytest.mark.asyncio
 async def test_message_splicing():
     """assistant 消息包含 text + 多个 tool_use；对应的 tool_result 被打包在一起。"""
-    client = MockLLMClient([
-        # 第 1 轮：一个响应里包含两次工具调用
+    client = MockLLMClient(
         [
-            TextDelta("Reading two files."),
-            ToolCallComplete("t1", "ReadFile", {"file_path": "LUMECODE.md"}),
-            ToolCallComplete("t2", "ReadFile", {"file_path": "pyproject.toml"}),
-            StreamEnd("end_turn", input_tokens=10, output_tokens=20),
-        ],
-        # 第 2 轮：最终响应
-        [
-            TextDelta("Done."),
-            StreamEnd("end_turn", input_tokens=30, output_tokens=10),
-        ],
-    ])
+            # 第 1 轮：一个响应里包含两次工具调用
+            [
+                TextDelta("Reading two files."),
+                ToolCallComplete("t1", "ReadFile", {"file_path": "LUMECODE.md"}),
+                ToolCallComplete("t2", "ReadFile", {"file_path": "pyproject.toml"}),
+                StreamEnd("end_turn", input_tokens=10, output_tokens=20),
+            ],
+            # 第 2 轮：最终响应
+            [
+                TextDelta("Done."),
+                StreamEnd("end_turn", input_tokens=30, output_tokens=10),
+            ],
+        ]
+    )
     registry = create_default_registry()
     agent = Agent(client, registry, "anthropic", work_dir=".")
     conv = ConversationManager()
@@ -327,20 +364,23 @@ async def test_message_splicing():
     assert tool_results_msg["content"][0]["tool_use_id"] == "t1"
     assert tool_results_msg["content"][1]["tool_use_id"] == "t2"
 
+
 @pytest.mark.asyncio
 async def test_concurrent_batch_execution():
     """多个 ReadFile 调用并发执行（属于同一批次）。"""
-    client = MockLLMClient([
+    client = MockLLMClient(
         [
-            ToolCallComplete("t1", "ReadFile", {"file_path": "LUMECODE.md"}),
-            ToolCallComplete("t2", "ReadFile", {"file_path": "pyproject.toml"}),
-            StreamEnd("end_turn", input_tokens=10, output_tokens=20),
-        ],
-        [
-            TextDelta("Both files read."),
-            StreamEnd("end_turn", input_tokens=30, output_tokens=10),
-        ],
-    ])
+            [
+                ToolCallComplete("t1", "ReadFile", {"file_path": "LUMECODE.md"}),
+                ToolCallComplete("t2", "ReadFile", {"file_path": "pyproject.toml"}),
+                StreamEnd("end_turn", input_tokens=10, output_tokens=20),
+            ],
+            [
+                TextDelta("Both files read."),
+                StreamEnd("end_turn", input_tokens=30, output_tokens=10),
+            ],
+        ]
+    )
     registry = create_default_registry()
     agent = Agent(client, registry, "anthropic", work_dir=".")
     conv = ConversationManager()
@@ -355,25 +395,28 @@ async def test_concurrent_batch_execution():
     # 两个都应成功（这些文件在项目根目录下存在）
     assert all(not r.is_error for r in c["tool_result"])
 
+
 @pytest.mark.asyncio
 async def test_token_usage_accumulates():
     """Usage 事件展示的是累计的 token 数量。"""
-    client = MockLLMClient([
+    client = MockLLMClient(
         [
-            TextDelta("Step 1"),
-            ToolCallComplete("t1", "ReadFile", {"file_path": "LUMECODE.md"}),
-            StreamEnd("end_turn", input_tokens=100, output_tokens=50),
-        ],
-        [
-            TextDelta("Step 2"),
-            ToolCallComplete("t2", "ReadFile", {"file_path": "LUMECODE.md"}),
-            StreamEnd("end_turn", input_tokens=200, output_tokens=80),
-        ],
-        [
-            TextDelta("Done."),
-            StreamEnd("end_turn", input_tokens=300, output_tokens=100),
-        ],
-    ])
+            [
+                TextDelta("Step 1"),
+                ToolCallComplete("t1", "ReadFile", {"file_path": "LUMECODE.md"}),
+                StreamEnd("end_turn", input_tokens=100, output_tokens=50),
+            ],
+            [
+                TextDelta("Step 2"),
+                ToolCallComplete("t2", "ReadFile", {"file_path": "LUMECODE.md"}),
+                StreamEnd("end_turn", input_tokens=200, output_tokens=80),
+            ],
+            [
+                TextDelta("Done."),
+                StreamEnd("end_turn", input_tokens=300, output_tokens=100),
+            ],
+        ]
+    )
     registry = create_default_registry()
     agent = Agent(client, registry, "anthropic", work_dir=".")
     conv = ConversationManager()
@@ -391,6 +434,7 @@ async def test_token_usage_accumulates():
     assert c["usage"][1].output_tokens == 130
     assert c["usage"][2].input_tokens == 600
     assert c["usage"][2].output_tokens == 230
+
 
 @pytest.mark.asyncio
 async def test_plan_mode():
@@ -411,6 +455,7 @@ async def test_plan_mode():
     assert "EditFile" in names
     assert "Bash" in names
 
+
 @pytest.mark.asyncio
 async def test_plan_mode_denied_tool_returns_error():
     """在 plan 模式下，写入类工具需要审批（effect=ask）；当用户
@@ -423,17 +468,19 @@ async def test_plan_mode_denied_tool_returns_error():
         RuleEngine,
     )
 
-    client = MockLLMClient([
+    client = MockLLMClient(
         [
-            TextDelta("Let me write..."),
-            ToolCallComplete("t1", "WriteFile", {"file_path": "x.txt", "content": "hi"}),
-            StreamEnd("end_turn", input_tokens=10, output_tokens=20),
-        ],
-        [
-            TextDelta("OK, I can't write in plan mode."),
-            StreamEnd("end_turn", input_tokens=30, output_tokens=15),
-        ],
-    ])
+            [
+                TextDelta("Let me write..."),
+                ToolCallComplete("t1", "WriteFile", {"file_path": "x.txt", "content": "hi"}),
+                StreamEnd("end_turn", input_tokens=10, output_tokens=20),
+            ],
+            [
+                TextDelta("OK, I can't write in plan mode."),
+                StreamEnd("end_turn", input_tokens=30, output_tokens=15),
+            ],
+        ]
+    )
     registry = create_default_registry()
     checker = PermissionChecker(
         detector=DangerousCommandDetector(),
@@ -459,6 +506,7 @@ async def test_plan_mode_denied_tool_returns_error():
     assert "denied" in c["tool_result"][0].output.lower() or "拒绝" in c["tool_result"][0].output
     assert len(c["error"]) == 0
 
+
 def test_partition_tool_calls():
     """分批逻辑会把可并发执行的调用归到同一组。"""
     from lumecode.tools.base import ToolCallComplete
@@ -477,19 +525,23 @@ def test_partition_tool_calls():
     assert not batches[1].concurrent and len(batches[1].calls) == 1
     assert batches[2].concurrent and len(batches[2].calls) == 2
 
+
 def test_system_prompt_normal():
     sp = build_system_prompt()
-    assert "lumecode" in sp
+    assert "LumeCode" in sp
     assert "Plan mode" not in sp
+
 
 def test_system_prompt_plan():
     reminder = build_plan_mode_reminder("/tmp/plan.md", False, 1)
     assert "Plan mode" in reminder
     assert "MUST NOT" in reminder
 
+
 def test_plan_mode_sparse_reminder():
     reminder = build_plan_mode_reminder("/tmp/plan.md", True, 8)
     assert "Plan mode still active" in reminder
+
 
 def test_environment_context():
     ctx = build_environment_context("/home/user/project")
@@ -516,17 +568,19 @@ async def test_streaming_tool_execution():
                 yield e
                 await asyncio.sleep(0)
 
-    client = SlowMockClient([
+    client = SlowMockClient(
         [
-            ToolCallComplete("t1", "Glob", {"pattern": "*.py"}),
-            ToolCallComplete("t2", "Glob", {"pattern": "*.toml"}),
-            StreamEnd("end_turn", input_tokens=10, output_tokens=20),
-        ],
-        [
-            TextDelta("Done."),
-            StreamEnd("end_turn", input_tokens=30, output_tokens=10),
-        ],
-    ])
+            [
+                ToolCallComplete("t1", "Glob", {"pattern": "*.py"}),
+                ToolCallComplete("t2", "Glob", {"pattern": "*.toml"}),
+                StreamEnd("end_turn", input_tokens=10, output_tokens=20),
+            ],
+            [
+                TextDelta("Done."),
+                StreamEnd("end_turn", input_tokens=30, output_tokens=10),
+            ],
+        ]
+    )
     registry = create_default_registry()
 
     # 记录工具执行时间
@@ -535,6 +589,7 @@ async def test_streaming_tool_execution():
 
     async def patched_execute(params):
         import time
+
         execution_log.append(("start", time.monotonic()))
         result = await original_execute(params)
         execution_log.append(("end", time.monotonic()))
